@@ -9,6 +9,12 @@ export function useOpenCode() {
   const [selectedSession, setSelectedSession] = useState(null)
   const [messages, setMessages] = useState([])
   const eventUnsubscribeRef = useRef(null)
+  const selectedSessionRef = useRef(null)
+  
+  // Keep ref in sync with state for event handlers
+  useEffect(() => {
+    selectedSessionRef.current = selectedSession
+  }, [selectedSession])
 
   // Connect to OpenCode server
   const connect = useCallback(async () => {
@@ -34,38 +40,52 @@ export function useOpenCode() {
         const eventType = data ? type : event?.type;
         
         if (!event || !eventType) {
-          // Skip events without proper structure
           return;
         }
         
         console.log('SSE Event:', eventType, event)
         
+        // Get current session from ref (not stale closure)
+        const currentSession = selectedSessionRef.current
+        
         // Handle different event types
         switch (eventType) {
+          case 'message.created':
           case 'message.updated':
-            if (event.properties?.sessionID === selectedSession?.id) {
+            // Check if message belongs to current session
+            const sessionID = event.properties?.sessionID || event.properties?.info?.sessionID
+            if (sessionID === currentSession?.id) {
               setMessages(prev => {
-                // Check if message already exists
-                const exists = prev.find(m => m.id === event.properties?.info?.id)
-                if (exists) {
-                  return prev.map(m => m.id === event.properties?.info?.id 
-                    ? { ...m, ...event.properties?.info }
-                    : m
-                  )
+                const msgId = event.properties?.info?.id || event.properties?.id
+                const existingIndex = prev.findIndex(m => m.id === msgId)
+                
+                const newMessage = {
+                  id: msgId,
+                  role: event.properties?.info?.role || event.properties?.role,
+                  content: event.properties?.info?.content || event.properties?.content || '',
+                  parts: event.properties?.parts || event.properties?.info?.parts || [],
+                  time: event.properties?.info?.time || event.properties?.time || { created: Date.now() }
                 }
-                return [...prev, {
-                  id: event.properties?.info?.id,
-                  role: event.properties?.info?.role,
-                  content: event.properties?.info?.content || '',
-                  parts: event.properties?.parts || [],
-                  time: event.properties?.info?.time
-                }]
+                
+                if (existingIndex >= 0) {
+                  // Update existing message
+                  const newMessages = [...prev]
+                  newMessages[existingIndex] = { ...newMessages[existingIndex], ...newMessage }
+                  return newMessages
+                } else {
+                  // Add new message
+                  return [...prev, newMessage]
+                }
               })
             }
             break
             
           case 'session.created':
-            setSessions(prev => [...prev, event.properties?.info])
+            setSessions(prev => {
+              const exists = prev.find(s => s.id === event.properties?.info?.id)
+              if (exists) return prev
+              return [...prev, event.properties?.info]
+            })
             break
             
           case 'session.updated':
@@ -77,7 +97,7 @@ export function useOpenCode() {
             break
             
           case 'session.status':
-            // Update session status
+            // Update session status if needed
             break
             
           case 'session.idle':
@@ -97,7 +117,7 @@ export function useOpenCode() {
     } finally {
       setConnecting(false)
     }
-  }, [selectedSession])
+  }, []) // No dependencies - uses ref for current session
 
   // Disconnect
   const disconnect = useCallback(() => {
@@ -152,9 +172,10 @@ export function useOpenCode() {
     }
     
     try {
-      // Add user message to UI immediately
+      // Add user message to UI immediately (optimistic update)
+      const tempId = `temp_${Date.now()}`
       const userMsg = {
-        id: `temp_${Date.now()}`,
+        id: tempId,
         role: 'user',
         content,
         time: { created: Date.now() }
@@ -162,16 +183,18 @@ export function useOpenCode() {
       setMessages(prev => [...prev, userMsg])
       
       // Send to OpenCode
-      const response = await api.sendMessage(selectedSession.id, {
+      await api.sendMessage(selectedSession.id, {
+        message: content,
         parts: [{ type: 'text', text: content }]
       })
       
-      // Remove temp message and add real one when it arrives via SSE
-      setMessages(prev => prev.filter(m => m.id !== userMsg.id))
+      // The real message will arrive via SSE and replace/update the temp one
+      // We keep the temp message so the UI doesn't flicker
       
-      return response
     } catch (err) {
       console.error('Failed to send message:', err)
+      // Remove temp message on error
+      setMessages(prev => prev.filter(m => m.id !== tempId))
       throw err
     }
   }, [selectedSession])

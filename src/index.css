@@ -251,3 +251,13 @@ input:focus, textarea:focus, select:focus {
 .tars-indicator {
   animation: tars-blink 0.3s ease-in-out;
 }
+
+/* Bounce animation for thinking dots */
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+.animate-bounce {
+  animation: bounce 0.6s infinite;
+}

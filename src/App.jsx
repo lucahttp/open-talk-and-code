@@ -149,38 +149,61 @@ const SessionList = ({ sessions, selectedId, onSelect, onCreate, loading }) => (
 
 const ChatLog = ({ messages, isProcessing }) => {
   const messagesEndRef = useRef(null)
+  const containerRef = useRef(null)
   
+  // Auto-scroll to bottom when messages change
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (containerRef.current) {
+      containerRef.current.scrollTop = containerRef.current.scrollHeight
+    }
   }, [messages])
   
+  // Check if last message is from user (waiting for response)
+  const lastMessageIsUser = messages.length > 0 && messages[messages.length - 1]?.role === 'user'
+  
   return (
-    <div className="border border-gray-600 p-2 mb-4 bg-black flex-1 overflow-y-auto min-h-0">
+    <div 
+      ref={containerRef}
+      className="border border-gray-600 p-2 mb-4 bg-black flex-1 overflow-y-auto min-h-0"
+    >
       <div className="text-xs text-terminal mb-2 pb-1 border-b border-gray-600 sticky top-0 bg-black">
-        ┌─ CHAT LOG ─────────────────────────────┐
+        ┌─ CHAT LOG ({messages.length} messages) ─┐
       </div>
-      <div className="space-y-2">
+      <div className="space-y-3">
         {messages.length === 0 ? (
           <div className="text-xs text-gray-500 italic text-center py-8">
-            Say &quot;Hey Buddy&quot; to start
+            Say &quot;Hey Buddy&quot; to start a conversation
           </div>
         ) : (
           messages.map((m, i) => (
-            <div key={m.id || i} className="text-xs animate-in fade-in slide-in-from-bottom-2">
+            <div 
+              key={m.id || `msg_${i}`} 
+              className="text-xs animate-in fade-in"
+              style={{ animationDelay: `${i * 50}ms` }}
+            >
               <div className={`font-bold ${m.role === 'user' ? 'text-terminal' : 'text-cyan-400'}`}>
-                {m.role === 'user' ? '>' : 'AI:'}
+                {m.role === 'user' ? '> YOU' : 'AI:'}
               </div>
-              <div className={`pl-2 ${m.role === 'user' ? 'text-terminal' : 'text-gray-300'}`}>
-                {m.content || m.parts?.map(p => p.text).join(' ') || '[Processing...]'}
+              <div className={`pl-2 ${m.role === 'user' ? 'text-terminal' : 'text-gray-300'} whitespace-pre-wrap`}>
+                {m.content || (m.parts && m.parts.map(p => p.text).join(' ')) || ''}
               </div>
             </div>
           ))
         )}
-        {isProcessing && (
-          <div className="text-xs text-cyan-400 animate-pulse">
-            [Thinking...]
+        
+        {/* Show thinking indicator when processing or waiting for response */}
+        {(isProcessing || lastMessageIsUser) && (
+          <div className="text-xs text-cyan-400 animate-pulse flex items-center gap-2">
+            <span>[Thinking</span>
+            <span className="inline-flex">
+              <span className="animate-bounce">.</span>
+              <span className="animate-bounce" style={{ animationDelay: '0.1s' }}>.</span>
+              <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>.</span>
+            </span>
+            <span>]</span>
           </div>
         )}
+        
         <div ref={messagesEndRef} />
       </div>
     </div>
@@ -336,16 +359,25 @@ function App() {
     requestMicrophonePermission,
   } = useHeyBuddy(heyBuddyOptions, handleRecordingComplete);
 
-  // Processed text ref to prevent duplicate processing
-  const processedTextRef = useRef('');
+  // Track processed transcripts to avoid duplicates
+  const processedTranscriptsRef = useRef(new Set());
 
   // Transcription -> OpenCode
   useEffect(() => {
     if (transcript?.text && !transcript.isBusy && connected && selectedSession) {
-      if (processedTextRef.current === transcript.text) return;
+      const text = transcript.text;
+      
+      // Skip if we already processed this exact text
+      if (processedTranscriptsRef.current.has(text)) {
+        clearTranscript();
+        return;
+      }
+      
+      // Mark as processed
+      processedTranscriptsRef.current.add(text);
 
       // Remove wake words from the beginning of the transcript
-      let cleanedText = transcript.text;
+      let cleanedText = text;
       for (const wakeWord of WAKE_WORDS) {
         const regex = new RegExp(`^\\s*${wakeWord}[,\\s]*`, 'i');
         cleanedText = cleanedText.replace(regex, '').trim();
@@ -354,7 +386,6 @@ function App() {
       // Only send if there's actual content after removing wake word
       if (cleanedText) {
         console.log('Transcription complete, sending to OpenCode:', cleanedText);
-        processedTextRef.current = transcript.text;
         
         // Play chiptune processing sound
         if (settings.chiptune) {
@@ -366,22 +397,18 @@ function App() {
           if (settings.chiptune) {
             chiptune.playSuccess();
           }
-        }).catch(() => {
+        }).catch((err) => {
+          console.error('Failed to send:', err);
           if (settings.chiptune) {
             chiptune.playError();
           }
         });
       }
+      
+      // Clear transcript after processing
       clearTranscript();
     }
   }, [transcript, connected, selectedSession, sendMessage, clearTranscript, settings.chiptune]);
-
-  // Clear processed text when transcript is cleared
-  useEffect(() => {
-    if (!transcript?.text) {
-      processedTextRef.current = '';
-    }
-  }, [transcript]);
 
   // Pause listening during processing/speaking
   useEffect(() => {
