@@ -17,31 +17,8 @@ const HF_TOKEN = import.meta.env.VITE_HF_TOKEN || null
 // Configure transformers.js cache
 env.allowLocalModels = true
 env.allowRemoteModels = true
-// Use IndexedDB for caching models in the browser
 env.useBrowserCache = true
-// Cache directory for models (this is virtual in browser, uses IndexedDB)
 env.cacheDir = '/models'
-
-// Enhanced logging for model loading
-const originalFetch = window.fetch;
-window.fetch = async (...args) => {
-  const url = args[0];
-  if (typeof url === 'string' && url.includes('huggingface.co')) {
-    console.log(`[HF Fetch] ${url.substring(0, 80)}...`);
-    try {
-      const response = await originalFetch(...args);
-      console.log(`[HF Fetch] ${url.substring(0, 50)}... -> ${response.status} ${response.statusText}`);
-      if (!response.ok && response.status === 401) {
-        console.error(`[HF Fetch] ❌ Unauthorized - model may be gated or require token`);
-      }
-      return response;
-    } catch (err) {
-      console.error(`[HF Fetch] ❌ Error: ${err.message}`);
-      throw err;
-    }
-  }
-  return originalFetch(...args);
-};
 
 // Log token status
 if (HF_TOKEN) {
@@ -79,6 +56,10 @@ const LoadingScreen = ({ progress, status, onComplete }) => {
   const totalModels = 5; // Hey Buddy models + Whisper + FunctionGemma
   const completedModels = Object.values(progress).filter(p => p === 100).length;
   const totalProgress = Object.values(progress).reduce((sum, p) => sum + p, 0) / totalModels;
+  
+  // Check Web Speech API support
+  const webSpeechSupported = typeof window !== 'undefined' && 
+    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
   
   return (
     <div className="fixed inset-0 bg-black flex flex-col items-center justify-center z-50">
@@ -127,6 +108,17 @@ const LoadingScreen = ({ progress, status, onComplete }) => {
               </span>
             </div>
           ))}
+        </div>
+        
+        {/* Fallback Status */}
+        <div className="mt-3 pt-2 border-t border-gray-700">
+          <div className="text-gray-500 text-xs font-mono mb-1">FALLBACK METHODS:</div>
+          <div className={`text-xs font-mono ${webSpeechSupported ? 'text-terminal' : 'text-red-500'}`}>
+            {webSpeechSupported ? '✓ Web Speech API (browser built-in)' : '✗ Web Speech API (not supported)'}
+          </div>
+          <div className="text-terminal text-xs font-mono">
+            ✓ Regex Intent Classification (always available)
+          </div>
         </div>
         
         <div className="mt-4 text-gray-500 text-xs font-mono">
@@ -196,11 +188,17 @@ const StatusBar = ({
   isProcessing,
   ttsEnabled,
   activeWakeWords,
-  activity
+  activity,
+  transcriptionMethod,
+  webSpeechSupported
 }) => {
   const getStatus = () => {
     if (isRecording) return { icon: '🔴', text: 'RECORDING', color: 'text-red-500' };
-    if (isTranscribing) return { icon: '📝', text: 'TRANSCRIBING', color: 'text-cyan-400' };
+    if (isTranscribing) return { 
+      icon: '📝', 
+      text: transcriptionMethod === 'webspeech' ? 'TRANSCRIBING (Web Speech)' : 'TRANSCRIBING (Whisper)', 
+      color: 'text-cyan-400' 
+    };
     if (isProcessing || isGenerating) return { icon: '⚡', text: 'PROCESSING', color: 'text-cyan-400 animate-pulse' };
     if (isSpeaking) return { icon: '🔊', text: 'SPEAKING', color: 'text-orange-400' };
     if (isListening && activeWakeWords.length > 0) return { 
@@ -216,7 +214,7 @@ const StatusBar = ({
   
   return (
     <div className="flex items-center justify-between border border-gray-600 p-2 mb-2 bg-black">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <span className={`text-lg ${status.color}`}>
           {status.icon}
         </span>
@@ -224,6 +222,11 @@ const StatusBar = ({
           {status.text}
         </span>
         {activity && <ActivityStatus activity={activity} />}
+        {transcriptionMethod === 'webspeech' && (
+          <span className="text-xs text-yellow-400 ml-2" title="Using browser Web Speech API (Whisper unavailable)">
+            [FALLBACK]
+          </span>
+        )}
         {ttsEnabled && (
           <span className="text-xs text-orange-400 ml-2">
             [TTS]
@@ -419,7 +422,7 @@ const ChatLog = ({ messages, isProcessing, activity, streamingContent }) => {
   )
 }
 
-const Controls = ({ settings, onToggle }) => (
+const Controls = ({ settings, onToggle, transcriptionMethod, webSpeechSupported }) => (
   <div className="flex items-center justify-between text-xs border-t border-gray-600 pt-2 mt-2">
     <div className="flex gap-4">
       <button 
@@ -434,6 +437,15 @@ const Controls = ({ settings, onToggle }) => (
       >
         [SFX: {settings.chiptune ? 'ON' : 'OFF'}]
       </button>
+      {webSpeechSupported && (
+        <button 
+          onClick={() => onToggle('forceWebSpeech')}
+          className={`${settings.forceWebSpeech ? 'text-yellow-400' : transcriptionMethod === 'webspeech' ? 'text-yellow-400' : 'text-gray-500'}`}
+          title={transcriptionMethod === 'webspeech' ? 'Using Web Speech API (Whisper unavailable)' : settings.forceWebSpeech ? 'Forced Web Speech API' : 'Using Whisper'}
+        >
+          [STT: {settings.forceWebSpeech || transcriptionMethod === 'webspeech' ? 'Web Speech' : 'Whisper'}]
+        </button>
+      )}
     </div>
     <select 
       value={settings.voice}
@@ -541,34 +553,14 @@ const useModelLoader = () => {
         await new Promise(resolve => setTimeout(resolve, 500));
         console.log('[ModelLoader] ✓ Hey Buddy initialized');
         
-        // Step 2: Whisper
-        console.log('[ModelLoader] Step 2/5: Loading Whisper...');
-        setStatus('Loading Whisper transcription...');
-
-        try {
-          await pipeline(
-            'automatic-speech-recognition',
-            'Xenova/whisper-tiny',
-            {
-              dtype: 'fp16',
-              device: 'webgpu',
-              progress_callback: (data) => {
-                if (data.status === 'progress') {
-                  setProgress(prev => ({
-                    ...prev,
-                    'Whisper Transcription': Math.round(data.progress)
-                  }));
-                }
-              }
-            }
-          );
-          console.log('[ModelLoader] ✓ Whisper loaded');
-          setProgress(prev => ({ ...prev, 'Whisper Transcription': 100 }));
-        } catch (whisperErr) {
-          console.error('[ModelLoader] ❌ Whisper failed:', whisperErr.message);
-          errors.push(`Whisper: ${whisperErr.message}`);
-          setProgress(prev => ({ ...prev, 'Whisper Transcription': 100 })); // Mark as done to continue
-        }
+        // Step 2: Whisper (skip preload - will load on demand or use Web Speech API fallback)
+        console.log('[ModelLoader] Step 2/5: Skipping Whisper preload (will load on demand or use Web Speech API fallback)');
+        setStatus('Whisper will load on demand (Web Speech API fallback ready)...');
+        setProgress(prev => ({ ...prev, 'Whisper Transcription': 100 }));
+        
+        // Check Web Speech API support
+        const webSpeechSupported = 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
+        console.log('[ModelLoader] Web Speech API supported:', webSpeechSupported);
 
         // Step 3: FunctionGemma Intent (Optional - uses regex fallback if fails)
         console.log('[ModelLoader] Step 3/5: Skipping FunctionGemma preload (will lazy-load if needed)');
@@ -623,7 +615,8 @@ const loadSettings = () => {
   return {
     tts: true,
     chiptune: true,
-    voice: 'M1'
+    voice: 'M1',
+    forceWebSpeech: false
   }
 }
 
@@ -641,6 +634,7 @@ function App() {
   const [settings, setSettings] = useState(loadSettings)
   const [showPermissionPrompt, setShowPermissionPrompt] = useState(false)
   const lastMessageRef = useRef(null)
+  const [showTranscriptionError, setShowTranscriptionError] = useState(null)
 
   // Persist settings to localStorage
   useEffect(() => {
@@ -677,20 +671,49 @@ function App() {
     isTranscribing,
     isModelLoading: isTranscriberLoading,
     progress: transcriptionProgress,
+    error: transcriptionError,
+    transcriptionMethod,
     transcribe,
     clear: clearTranscript,
+    transcribeWithWebSpeech,
+    webSpeechSupported,
   } = useTranscriber();
+
+  // Show transcription errors
+  useEffect(() => {
+    if (transcriptionError) {
+      setShowTranscriptionError(transcriptionError);
+      const timer = setTimeout(() => setShowTranscriptionError(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [transcriptionError]);
+
+  // Track if we're using Web Speech API fallback
+  const isWebSpeechFallback = transcriptionMethod === 'webspeech';
 
   // Handle recording complete from Hey Buddy
   const handleRecordingComplete = useCallback((audioSamples) => {
     console.log('Recording complete, starting transcription...', audioSamples.length, 'samples');
-    clearTranscript();
-    transcribe(audioSamples, 'en');
+    
+    // Check if we should use Web Speech API (forced or fallback)
+    const useWebSpeech = settings.forceWebSpeech || transcriptionMethod === 'webspeech';
+    
+    // If Whisper failed or forced to use Web Speech API, use it instead
+    if (useWebSpeech && webSpeechSupported) {
+      console.log('[App] Using Web Speech API for transcription');
+      // Web Speech API will be started via transcribeWithWebSpeech
+      // We need to trigger it here since we can't use the audio samples
+      transcribeWithWebSpeech('en-US');
+    } else {
+      // Use Whisper (normal flow)
+      clearTranscript();
+      transcribe(audioSamples, 'en');
+    }
     
     if (settings.chiptune) {
       chiptune.playRecordingStart();
     }
-  }, [transcribe, clearTranscript, settings.chiptune]);
+  }, [transcribe, clearTranscript, settings.chiptune, settings.forceWebSpeech, transcriptionMethod, webSpeechSupported, transcribeWithWebSpeech]);
 
   // Hey Buddy hook
   const {
@@ -840,6 +863,8 @@ function App() {
     if (key === 'voice') {
       setSettings(s => ({ ...s, voice: value }));
       tts.setVoice(value);
+    } else if (key === 'forceWebSpeech') {
+      setSettings(s => ({ ...s, forceWebSpeech: !s.forceWebSpeech }));
     } else {
       setSettings(s => ({ ...s, [key]: !s[key] }));
     }
@@ -869,6 +894,8 @@ function App() {
         ttsEnabled={settings.tts}
         activeWakeWords={activeWakeWords}
         activity={activity}
+        transcriptionMethod={transcriptionMethod}
+        webSpeechSupported={webSpeechSupported}
       />
       
       {isLoading && (
@@ -877,6 +904,24 @@ function App() {
         </div>
       )}
       
+        {/* Transcription Error Toast */}
+        {showTranscriptionError && (
+          <div className="fixed top-4 right-4 z-50 border border-red-500 bg-black p-3 max-w-sm">
+            <div className="text-red-500 text-sm font-bold mb-1">⚠️ Transcription Error</div>
+            <div className="text-gray-400 text-xs">{showTranscriptionError}</div>
+            {webSpeechSupported && transcriptionMethod !== 'webspeech' && (
+              <div className="text-yellow-400 text-xs mt-2">
+                Switching to Web Speech API fallback...
+              </div>
+            )}
+            {!webSpeechSupported && (
+              <div className="text-red-400 text-xs mt-2">
+                Web Speech API not available in this browser.
+              </div>
+            )}
+          </div>
+        )}
+
       {/* Visualizers */}
       {isInitialized && (
         <div className="flex gap-4 mb-4">
@@ -929,7 +974,12 @@ function App() {
             streamingContent={streamingContent}
           />
           
-          <Controls settings={settings} onToggle={handleToggle} />
+          <Controls 
+            settings={settings} 
+            onToggle={handleToggle}
+            transcriptionMethod={transcriptionMethod}
+            webSpeechSupported={webSpeechSupported}
+          />
         </div>
       </div>
       

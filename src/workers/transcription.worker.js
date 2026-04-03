@@ -7,7 +7,7 @@ import { pipeline, WhisperTextStreamer } from "@huggingface/transformers";
 // Singleton pipeline factory
 class TranscriptionPipeline {
     static task = "automatic-speech-recognition";
-    static model = "Xenova/whisper-tiny"; // Public model, no token needed
+    static model = "onnx-community/whisper-base"; // Using whisper-base like mortimer-js (more reliable)
     static instance = null;
 
     static async getInstance(progressCallback = null) {
@@ -31,9 +31,11 @@ self.addEventListener("message", async (event) => {
 
     try {
         // Load transcriber with progress reporting
+        console.log('[TranscriptionWorker] Loading model:', TranscriptionPipeline.model);
         const transcriber = await TranscriptionPipeline.getInstance((data) => {
             self.postMessage(data);
         });
+        console.log('[TranscriptionWorker] Model loaded successfully');
 
         const time_precision =
             transcriber.processor.feature_extractor.config.chunk_length /
@@ -106,7 +108,12 @@ self.addEventListener("message", async (event) => {
             },
         });
     } catch (error) {
-        console.error("Transcription error:", error);
+        console.error("[TranscriptionWorker] Error:", error.message);
+        console.error("[TranscriptionWorker] Model:", TranscriptionPipeline.model);
+        // Check if it's the HTML error
+        if (error.message.includes('<!doctype')) {
+            console.error("[TranscriptionWorker] HuggingFace returned HTML instead of JSON - model may be gated or unavailable");
+        }
         self.postMessage({
             status: "error",
             data: { message: error.message },

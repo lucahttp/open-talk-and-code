@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import webSpeechTranscription from '../services/web-speech-api';
 
 /**
- * Custom hook for Whisper WebGPU transcription
+ * Custom hook for Whisper WebGPU transcription with optional Web Speech API fallback
  */
 export function useTranscriber() {
     const [transcript, setTranscript] = useState(null);
@@ -9,8 +10,10 @@ export function useTranscriber() {
     const [isModelLoading, setIsModelLoading] = useState(false);
     const [progress, setProgress] = useState([]);
     const [error, setError] = useState(null);
+    const [transcriptionMethod, setTranscriptionMethod] = useState(null); // 'whisper' or 'webspeech'
 
     const workerRef = useRef(null);
+    const webSpeechActiveRef = useRef(false);
 
     // Initialize worker
     useEffect(() => {
@@ -46,6 +49,7 @@ export function useTranscriber() {
 
                 case 'ready':
                     setIsModelLoading(false);
+                    setTranscriptionMethod('whisper');
                     break;
 
                 case 'update':
@@ -68,8 +72,10 @@ export function useTranscriber() {
                     break;
 
                 case 'error':
+                    console.error('[useTranscriber] Whisper error:', message.data.message);
                     setError(message.data.message);
                     setIsTranscribing(false);
+                    setIsModelLoading(false);
                     break;
             }
         };
@@ -79,6 +85,40 @@ export function useTranscriber() {
                 workerRef.current.terminate();
             }
         };
+    }, []);
+
+    /**
+     * Transcribe using Web Speech API directly (manual fallback)
+     * @param {string} language - Language code
+     */
+    const transcribeWithWebSpeech = useCallback(async (language = 'en-US') => {
+        if (webSpeechActiveRef.current) return;
+        
+        webSpeechActiveRef.current = true;
+        setTranscriptionMethod('webspeech');
+        
+        try {
+            console.log('[useTranscriber] Using Web Speech API...');
+            
+            setIsTranscribing(true);
+            
+            const result = await webSpeechTranscription.transcribe(null, language);
+            
+            setTranscript({
+                text: result.text,
+                chunks: [{ text: result.text, timestamp: [0, 0], finalised: true }],
+                tps: 0,
+                isBusy: false,
+            });
+            
+            setIsTranscribing(false);
+            webSpeechActiveRef.current = false;
+        } catch (err) {
+            console.error('[useTranscriber] Web Speech API error:', err);
+            setError(err.message);
+            setIsTranscribing(false);
+            webSpeechActiveRef.current = false;
+        }
     }, []);
 
     /**
@@ -108,13 +148,25 @@ export function useTranscriber() {
         setError(null);
     }, []);
 
+    /**
+     * Reset transcription method to try Whisper again
+     */
+    const resetMethod = useCallback(() => {
+        setTranscriptionMethod(null);
+        setError(null);
+    }, []);
+
     return {
         transcript,
         isTranscribing,
         isModelLoading,
         progress,
         error,
+        transcriptionMethod,
         transcribe,
         clear,
+        resetMethod,
+        transcribeWithWebSpeech,
+        webSpeechSupported: webSpeechTranscription.isSupported,
     };
 }
