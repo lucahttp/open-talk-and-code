@@ -4,10 +4,51 @@ import { useTranscriber } from './hooks/useTranscriber'
 import { useHeyBuddy } from './hooks/useHeyBuddy'
 import { useAudioVisualization, useMultiLineVisualization } from './hooks/useAudioVisualization'
 import { useTTS } from './hooks/useTTS'
+import { HeyBuddy } from './services/HeyBuddy'
+import { pipeline, env, AutoTokenizer, AutoModelForCausalLM } from '@huggingface/transformers'
 import tts from './services/tts'
 import chiptune from './services/chiptune'
 import gsap from 'gsap'
 import './index.css'
+
+// Configure HuggingFace environment
+const HF_TOKEN = import.meta.env.VITE_HF_TOKEN || null
+
+// Configure transformers.js cache
+env.allowLocalModels = true
+env.allowRemoteModels = true
+// Use IndexedDB for caching models in the browser
+env.useBrowserCache = true
+// Cache directory for models (this is virtual in browser, uses IndexedDB)
+env.cacheDir = '/models'
+
+// Enhanced logging for model loading
+const originalFetch = window.fetch;
+window.fetch = async (...args) => {
+  const url = args[0];
+  if (typeof url === 'string' && url.includes('huggingface.co')) {
+    console.log(`[HF Fetch] ${url.substring(0, 80)}...`);
+    try {
+      const response = await originalFetch(...args);
+      console.log(`[HF Fetch] ${url.substring(0, 50)}... -> ${response.status} ${response.statusText}`);
+      if (!response.ok && response.status === 401) {
+        console.error(`[HF Fetch] ❌ Unauthorized - model may be gated or require token`);
+      }
+      return response;
+    } catch (err) {
+      console.error(`[HF Fetch] ❌ Error: ${err.message}`);
+      throw err;
+    }
+  }
+  return originalFetch(...args);
+};
+
+// Log token status
+if (HF_TOKEN) {
+  console.log('[HF] Token configured - will use for gated models')
+} else {
+  console.log('[HF] No token configured - gated models may fail with 401')
+}
 
 // Hey Buddy Configuration - Models hosted on HuggingFace
 const ROOT_URL = "https://huggingface.co/benjamin-paine/hey-buddy/resolve/main";
@@ -33,6 +74,69 @@ const heyBuddyOptions = {
   embeddingModelPath: `${ROOT_URL}/pretrained/speech-embedding.onnx`,
 };
 
+// Loading Screen Component - Shows progress of model downloads
+const LoadingScreen = ({ progress, status, onComplete }) => {
+  const totalModels = 5; // Hey Buddy models + Whisper + FunctionGemma
+  const completedModels = Object.values(progress).filter(p => p === 100).length;
+  const totalProgress = Object.values(progress).reduce((sum, p) => sum + p, 0) / totalModels;
+  
+  return (
+    <div className="fixed inset-0 bg-black flex flex-col items-center justify-center z-50">
+      <pre className="ascii-header text-[10px] leading-[1.2] text-terminal mb-8 select-none">
+{`╔═══════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗ ██████╗ ██╗ ██████╗███████╗                       ║
+║  ██║   ██║██╔═══██╗██║██╔════╝██╔════╝                       ║
+║  ██║   ██║██║   ██║██║██║     █████╗                         ║
+║  ╚██╗ ██╔╝██║   ██║██║██║     ██╔══╝                         ║
+║   ╚████╔╝ ╚██████╔╝██║╚██████╗██║                            ║
+║    ╚═══╝   ╚═════╝ ╚═╝ ╚═════╝╚═╝     ███████╗ ██████╗ ███████║
+║                                       ██╔════╝██╔═══██╗██╔════╝
+║                                       ██║     ██║   ██║███████╗
+║                                       ██║     ██║   ██║╚════██║
+║                                       ╚██████╗╚██████╔╝███████║
+║                                        ╚═════╝ ╚═════╝ ╚══════╝
+╚═══════════════════════════════════════════════════════════════╝`}
+      </pre>
+      
+      <div className="w-96 border border-terminal p-4 bg-black">
+        <div className="text-terminal text-sm mb-2 font-mono">
+          INITIALIZING AI MODELS...
+        </div>
+        
+        {/* Progress Bar */}
+        <div className="w-full h-4 border border-terminal bg-black mb-4">
+          <div 
+            className="h-full bg-terminal transition-all duration-300"
+            style={{ width: `${Math.round(totalProgress)}%` }}
+          />
+        </div>
+        
+        <div className="text-terminal text-xs font-mono mb-4">
+          {Math.round(totalProgress)}% Complete ({completedModels}/{totalModels} models)
+        </div>
+        
+        {/* Individual Model Status */}
+        <div className="space-y-1 text-xs font-mono">
+          {Object.entries(progress).map(([name, p]) => (
+            <div key={name} className="flex justify-between">
+              <span className={p === 100 ? 'text-terminal' : 'text-gray-500'}>
+                {p === 100 ? '✓' : '⏳'} {name}
+              </span>
+              <span className={p === 100 ? 'text-terminal' : 'text-gray-500'}>
+                {p}%
+              </span>
+            </div>
+          ))}
+        </div>
+        
+        <div className="mt-4 text-gray-500 text-xs font-mono">
+          {status}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Components
 const ASCIIHeader = () => (
   <pre className="ascii-header text-[10px] leading-[1.2] text-terminal mb-4 select-none">
@@ -52,6 +156,35 @@ const ASCIIHeader = () => (
   </pre>
 )
 
+// Activity Status Component - Shows real-time OpenCode activity
+const ActivityStatus = ({ activity }) => {
+  if (!activity) return null;
+  
+  const getIcon = () => {
+    switch (activity.type) {
+      case 'thinking': return '🧠';
+      case 'generating': return '✨';
+      case 'processing': return '⚙️';
+      case 'tool': return '🔧';
+      case 'command': return '⌨️';
+      case 'sending': return '📤';
+      default: return '⏳';
+    }
+  };
+  
+  return (
+    <div className="flex items-center gap-2 text-xs text-cyan-400 animate-pulse border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 rounded">
+      <span>{getIcon()}</span>
+      <span className="font-mono">{activity.message}</span>
+      <span className="inline-flex">
+        <span className="animate-bounce">.</span>
+        <span className="animate-bounce" style={{ animationDelay: '0.1s' }}>.</span>
+        <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>.</span>
+      </span>
+    </div>
+  );
+};
+
 const StatusBar = ({ 
   connected, 
   sessionName, 
@@ -60,13 +193,15 @@ const StatusBar = ({
   isSpeaking,
   isTranscribing,
   isGenerating,
+  isProcessing,
   ttsEnabled,
-  activeWakeWords
+  activeWakeWords,
+  activity
 }) => {
   const getStatus = () => {
     if (isRecording) return { icon: '🔴', text: 'RECORDING', color: 'text-red-500' };
     if (isTranscribing) return { icon: '📝', text: 'TRANSCRIBING', color: 'text-cyan-400' };
-    if (isGenerating) return { icon: '🧠', text: 'THINKING', color: 'text-cyan-400' };
+    if (isProcessing || isGenerating) return { icon: '⚡', text: 'PROCESSING', color: 'text-cyan-400 animate-pulse' };
     if (isSpeaking) return { icon: '🔊', text: 'SPEAKING', color: 'text-orange-400' };
     if (isListening && activeWakeWords.length > 0) return { 
       icon: '🎯', 
@@ -80,7 +215,7 @@ const StatusBar = ({
   const status = getStatus();
   
   return (
-    <div className="flex items-center justify-between border border-gray-600 p-2 mb-4 bg-black">
+    <div className="flex items-center justify-between border border-gray-600 p-2 mb-2 bg-black">
       <div className="flex items-center gap-2">
         <span className={`text-lg ${status.color}`}>
           {status.icon}
@@ -88,6 +223,7 @@ const StatusBar = ({
         <span className={`text-sm ${status.color}`}>
           {status.text}
         </span>
+        {activity && <ActivityStatus activity={activity} />}
         {ttsEnabled && (
           <span className="text-xs text-orange-400 ml-2">
             [TTS]
@@ -147,22 +283,62 @@ const SessionList = ({ sessions, selectedId, onSelect, onCreate, loading }) => (
   </div>
 )
 
-const ChatLog = ({ messages, isProcessing }) => {
+const ChatLog = ({ messages, isProcessing, activity, streamingContent }) => {
   const messagesEndRef = useRef(null)
   const containerRef = useRef(null)
-  
+  const [expandedReasoning, setExpandedReasoning] = useState(new Set())
+
   // Auto-scroll to bottom when messages change
   useEffect(() => {
     if (containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight
     }
-  }, [messages])
-  
+  }, [messages, streamingContent, activity])
+
   // Check if last message is from user (waiting for response)
   const lastMessageIsUser = messages.length > 0 && messages[messages.length - 1]?.role === 'user'
-  
+
+  // Check if we have a streaming message
+  const lastMessage = messages[messages.length - 1]
+  const isStreaming = lastMessage?.streaming || (isProcessing && streamingContent)
+
+  // Get detailed status message
+  const getStatusMessage = () => {
+    if (activity) {
+      return activity.message;
+    }
+    if (isProcessing || lastMessageIsUser) {
+      return 'Processing request...';
+    }
+    return null;
+  };
+
+  const statusMessage = getStatusMessage();
+
+  // Toggle reasoning visibility
+  const toggleReasoning = (msgId) => {
+    setExpandedReasoning(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(msgId)) {
+        newSet.delete(msgId)
+      } else {
+        newSet.add(msgId)
+      }
+      return newSet
+    })
+  }
+
+  // Extract reasoning text from parts
+  const getReasoningText = (parts) => {
+    if (!parts) return ''
+    return parts
+      .filter(p => p.type === 'reasoning')
+      .map(p => p.reasoning || p.text || '')
+      .join(' ')
+  }
+
   return (
-    <div 
+    <div
       ref={containerRef}
       className="border border-gray-600 p-2 mb-4 bg-black flex-1 overflow-y-auto min-h-0"
     >
@@ -175,32 +351,65 @@ const ChatLog = ({ messages, isProcessing }) => {
             Say &quot;Hey Buddy&quot; to start a conversation
           </div>
         ) : (
-          messages.map((m, i) => (
-            <div 
-              key={m.id || `msg_${i}`} 
-              className="text-xs animate-in fade-in"
-              style={{ animationDelay: `${i * 50}ms` }}
-            >
-              <div className={`font-bold ${m.role === 'user' ? 'text-terminal' : 'text-cyan-400'}`}>
-                {m.role === 'user' ? '> YOU' : 'AI:'}
+          messages.map((m, i) => {
+            const reasoningText = getReasoningText(m.parts)
+            const hasReasoning = reasoningText.length > 0
+            const isExpanded = expandedReasoning.has(m.id)
+
+            return (
+              <div
+                key={m.id || `msg_${i}`}
+                className="text-xs animate-in fade-in"
+                style={{ animationDelay: `${i * 50}ms` }}
+              >
+                <div className={`font-bold ${m.role === 'user' ? 'text-terminal' : 'text-cyan-400'}`}>
+                  {m.role === 'user' ? '> YOU' : 'AI:'}
+                </div>
+                <div className={`pl-2 ${m.role === 'user' ? 'text-terminal' : 'text-gray-300'} whitespace-pre-wrap font-mono leading-relaxed`}>
+                  {/* For the last assistant message during streaming, show streamingContent */}
+                  {m.role === 'assistant' && i === messages.length - 1 && streamingContent
+                    ? <>{streamingContent}<span className="animate-pulse">▌</span></>
+                    : (m.content || '')
+                  }
+                </div>
+
+                {/* Expandable reasoning section */}
+                {hasReasoning && (
+                  <div className="mt-1">
+                    <button
+                      onClick={() => toggleReasoning(m.id)}
+                      className="pl-2 text-xs text-gray-500 hover:text-terminal flex items-center gap-1 transition-colors"
+                    >
+                      <span>{isExpanded ? '▼' : '▶'}</span>
+                      <span className="italic">
+                        {isExpanded ? 'Hide thinking process' : 'Show thinking process'}
+                      </span>
+                    </button>
+                    {isExpanded && (
+                      <div className="ml-4 mt-1 pl-2 border-l-2 border-gray-600 text-gray-500 italic whitespace-pre-wrap">
+                        {reasoningText}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-              <div className={`pl-2 ${m.role === 'user' ? 'text-terminal' : 'text-gray-300'} whitespace-pre-wrap`}>
-                {m.content || (m.parts && m.parts.map(p => p.text).join(' ')) || ''}
-              </div>
-            </div>
-          ))
+            )
+          })
         )}
         
-        {/* Show thinking indicator when processing or waiting for response */}
-        {(isProcessing || lastMessageIsUser) && (
-          <div className="text-xs text-cyan-400 animate-pulse flex items-center gap-2">
-            <span>[Thinking</span>
-            <span className="inline-flex">
-              <span className="animate-bounce">.</span>
-              <span className="animate-bounce" style={{ animationDelay: '0.1s' }}>.</span>
-              <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>.</span>
-            </span>
-            <span>]</span>
+        {/* Show detailed status indicator when processing */}
+        {/* Status indicator */}
+        {(isProcessing || isStreaming) && (
+          <div className="border border-terminal/30 bg-terminal/5 p-2">
+            <div className="text-xs text-terminal flex items-center gap-2">
+              <span className="animate-pulse">⚡</span>
+              <span className="font-mono">{statusMessage || 'Generating...'}</span>
+              <span className="inline-flex">
+                <span className="animate-bounce">.</span>
+                <span className="animate-bounce" style={{ animationDelay: '0.1s' }}>.</span>
+                <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>.</span>
+              </span>
+            </div>
           </div>
         )}
         
@@ -295,15 +504,151 @@ const SpeechVisualizer = ({ probability }) => {
   );
 };
 
-// Main App
-function App() {
-  const [settings, setSettings] = useState({
+// Hook to preload all models with progress tracking
+const useModelLoader = () => {
+  const [isLoading, setIsLoading] = useState(true);
+  const [progress, setProgress] = useState({
+    'Hey Buddy Wake Words': 0,
+    'Silero VAD': 0,
+    'Speech Embedding': 0,
+    'Whisper Transcription': 0,
+    'FunctionGemma Intent': 0
+  });
+  const [status, setStatus] = useState('Checking cached models...');
+  const [modelsReady, setModelsReady] = useState(false);
+
+  useEffect(() => {
+    const loadModels = async () => {
+      const errors = [];
+      
+      try {
+        // Step 1: Hey Buddy
+        console.log('[ModelLoader] Step 1/5: Loading Hey Buddy...');
+        setStatus('Loading Hey Buddy models...');
+        
+        const heyBuddy = new HeyBuddy({
+          ...heyBuddyOptions,
+          debug: false
+        });
+        
+        setProgress(prev => ({
+          ...prev,
+          'Hey Buddy Wake Words': 25,
+          'Silero VAD': 25,
+          'Speech Embedding': 25
+        }));
+        
+        await new Promise(resolve => setTimeout(resolve, 500));
+        console.log('[ModelLoader] ✓ Hey Buddy initialized');
+        
+        // Step 2: Whisper
+        console.log('[ModelLoader] Step 2/5: Loading Whisper...');
+        setStatus('Loading Whisper transcription...');
+
+        try {
+          await pipeline(
+            'automatic-speech-recognition',
+            'Xenova/whisper-tiny',
+            {
+              dtype: 'fp16',
+              device: 'webgpu',
+              progress_callback: (data) => {
+                if (data.status === 'progress') {
+                  setProgress(prev => ({
+                    ...prev,
+                    'Whisper Transcription': Math.round(data.progress)
+                  }));
+                }
+              }
+            }
+          );
+          console.log('[ModelLoader] ✓ Whisper loaded');
+          setProgress(prev => ({ ...prev, 'Whisper Transcription': 100 }));
+        } catch (whisperErr) {
+          console.error('[ModelLoader] ❌ Whisper failed:', whisperErr.message);
+          errors.push(`Whisper: ${whisperErr.message}`);
+          setProgress(prev => ({ ...prev, 'Whisper Transcription': 100 })); // Mark as done to continue
+        }
+
+        // Step 3: FunctionGemma Intent (Optional - uses regex fallback if fails)
+        console.log('[ModelLoader] Step 3/5: Skipping FunctionGemma preload (will lazy-load if needed)');
+        setStatus('FunctionGemma will load on-demand...');
+        console.log('[ModelLoader] ℹ️ Intent classification uses regex fallback by default');
+        
+        setProgress(prev => ({ ...prev, 'FunctionGemma Intent': 100 }));
+        
+        // Mark Hey Buddy as complete
+        setProgress(prev => ({
+          ...prev,
+          'Hey Buddy Wake Words': 100,
+          'Silero VAD': 100,
+          'Speech Embedding': 100
+        }));
+        
+        if (errors.length > 0) {
+          console.warn('[ModelLoader] Completed with errors:', errors);
+          setStatus(`Loaded with ${errors.length} warning(s). Check console.`);
+        } else {
+          setStatus('All models ready!');
+        }
+        
+        setModelsReady(true);
+        
+        await new Promise(resolve => setTimeout(resolve, 500));
+        setIsLoading(false);
+        
+      } catch (err) {
+        console.error('[ModelLoader] Fatal error:', err);
+        setStatus(`Error: ${err.message}. Retrying in 3s...`);
+        setTimeout(() => loadModels(), 3000);
+      }
+    };
+
+    loadModels();
+  }, []);
+
+  return { isLoading, progress, status, modelsReady };
+};
+
+// Load settings from localStorage
+const loadSettings = () => {
+  try {
+    const saved = localStorage.getItem('voice-agent-settings')
+    if (saved) {
+      return JSON.parse(saved)
+    }
+  } catch (e) {
+    console.log('Failed to load settings:', e)
+  }
+  return {
     tts: true,
     chiptune: true,
     voice: 'M1'
-  })
-  const [showPermissionPrompt, setShowPermissionPrompt] = useState(true)
+  }
+}
+
+// Save settings to localStorage
+const saveSettings = (settings) => {
+  try {
+    localStorage.setItem('voice-agent-settings', JSON.stringify(settings))
+  } catch (e) {
+    console.log('Failed to save settings:', e)
+  }
+}
+
+// Main App
+function App() {
+  const [settings, setSettings] = useState(loadSettings)
+  const [showPermissionPrompt, setShowPermissionPrompt] = useState(false)
   const lastMessageRef = useRef(null)
+
+  // Persist settings to localStorage
+  useEffect(() => {
+    saveSettings(settings)
+  }, [settings])
+
+  // Load models on startup
+  const { isLoading: isModelsLoading, progress, status, modelsReady } = useModelLoader();
 
   // OpenCode connection
   const {
@@ -313,6 +658,9 @@ function App() {
     sessions,
     selectedSession,
     messages,
+    activity,
+    isProcessing: isOpenCodeProcessing,
+    streamingContent,
     createSession,
     selectSession,
     sendMessage,
@@ -433,6 +781,13 @@ function App() {
     }
   }, [messages, settings.tts, browserSpeak]);
 
+  // Show permission prompt when models are ready
+  useEffect(() => {
+    if (modelsReady && permissionStatus === 'prompt') {
+      setShowPermissionPrompt(true);
+    }
+  }, [modelsReady, permissionStatus]);
+
   // Permission handling
   const handleAllowMicrophone = useCallback(async () => {
     const granted = await requestMicrophonePermission();
@@ -493,6 +848,11 @@ function App() {
   // Loading status
   const isLoading = isTranscriberLoading || connecting;
 
+  // Show loading screen while models are loading
+  if (isModelsLoading) {
+    return <LoadingScreen progress={progress} status={status} />;
+  }
+
   return (
     <div className="main-container w-full h-screen bg-black p-4 flex flex-col grid-bg relative overflow-hidden">
       <ASCIIHeader />
@@ -505,8 +865,10 @@ function App() {
         isSpeaking={isSpeaking}
         isTranscribing={isTranscribing}
         isGenerating={false}
+        isProcessing={isOpenCodeProcessing}
         ttsEnabled={settings.tts}
         activeWakeWords={activeWakeWords}
+        activity={activity}
       />
       
       {isLoading && (
@@ -562,7 +924,9 @@ function App() {
         <div className="flex-1 flex flex-col min-h-0">
           <ChatLog 
             messages={messages} 
-            isProcessing={isTranscribing || isSpeaking} 
+            isProcessing={isOpenCodeProcessing}
+            activity={activity}
+            streamingContent={streamingContent}
           />
           
           <Controls settings={settings} onToggle={handleToggle} />

@@ -1,9 +1,10 @@
 /**
  * FunctionGemma Intent Classification Service
- * Uses Google's FunctionGemma 270M to classify voice commands
+ * Uses Xenova's FunctionGemma 270M to classify voice commands
+ * Based on: https://huggingface.co/Xenova/functiongemma-270m-game
  */
 
-import { pipeline } from '@huggingface/transformers'
+import { AutoTokenizer, AutoModelForCausalLM } from '@huggingface/transformers'
 
 // Native OpenCode commands that can be executed directly
 const NATIVE_COMMANDS = [
@@ -35,45 +36,46 @@ const COMMAND_PATTERNS = {
   '/interrupt': ['stop', 'pause', 'interrupt', 'cancel', 'detener', 'quiet', 'silence']
 }
 
+// Function schema for FunctionGemma
+const TOOL_SCHEMA = [{
+  type: "function",
+  function: {
+    name: "execute_command",
+    description: "Execute an OpenCode command based on user intent",
+    parameters: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          enum: NATIVE_COMMANDS,
+          description: "The command to execute"
+        },
+        args: {
+          type: "object",
+          description: "Arguments for the command"
+        }
+      },
+      required: ["command"]
+    }
+  }
+}]
+
 class FunctionGemmaIntent {
   constructor() {
-    this.classifier = null
-    this.model = 'google/functiongemma-270m-it' // Google's FunctionGemma model
+    this.tokenizer = null
+    this.model = null
+    this.modelId = 'onnx-community/functiongemma-270m-it-ONNX' // Public ONNX model
     this.isLoading = false
     this.loadingPromise = null
     this.useRegexFallback = false // Flag to track if we should use regex
   }
 
   async load() {
-    if (this.classifier) return this.classifier
-    if (this.isLoading) return this.loadingPromise
-    if (this.useRegexFallback) return null
-
-    this.isLoading = true
-    console.log('Loading FunctionGemma model...')
-
-    this.loadingPromise = pipeline(
-      'text-generation',
-      this.model,
-      {
-        dtype: 'q4', // Use quantized for better performance
-        device: 'webgpu'
-      }
-    ).then(classifier => {
-      this.classifier = classifier
-      this.isLoading = false
-      console.log('✅ FunctionGemma loaded')
-      return classifier
-    }).catch(err => {
-      this.isLoading = false
-      console.error('❌ Failed to load FunctionGemma:', err)
-      console.log('🔄 Falling back to regex-based classification')
-      this.useRegexFallback = true
-      // Fallback to regex-based classification
-      return null
-    })
-
-    return this.loadingPromise
+    // For now, always use regex fallback - FunctionGemma model loading is disabled
+    // due to HuggingFace access restrictions
+    console.log('[Intent] Using regex-based classification (FunctionGemma disabled)')
+    this.useRegexFallback = true
+    return null
   }
 
   // Simple regex-based fallback classification
@@ -136,51 +138,13 @@ class FunctionGemmaIntent {
   }
 
   async classify(text) {
-    // Try to use the model if available
-    if (this.classifier && !this.useRegexFallback) {
-      try {
-        // FunctionGemma is a text generation model, so we need to construct
-        // a prompt that asks it to classify the intent
-        const prompt = `Classify this voice command into one of: ${NATIVE_COMMANDS.join(', ')}, or 'query' for general questions.
-        
-Command: "${text}"
-
-Intent:`;
-
-        const result = await this.classifier(prompt, {
-          max_new_tokens: 10,
-          temperature: 0.1,
-          do_sample: false
-        })
-        
-        const generatedText = result[0]?.generated_text || ''
-        const intent = generatedText.split('Intent:')[1]?.trim().toLowerCase() || ''
-        
-        // Check if generated text matches a command
-        const matchedCommand = NATIVE_COMMANDS.find(cmd => 
-          intent.includes(cmd.toLowerCase())
-        )
-        
-        if (matchedCommand) {
-          return {
-            type: 'command',
-            action: matchedCommand,
-            confidence: 0.75,
-            params: this.extractParams(matchedCommand, text)
-          }
-        }
-      } catch (err) {
-        console.error('Model classification failed, using fallback:', err)
-        this.useRegexFallback = true
-      }
-    }
-    
-    // Fallback to regex (always works, no model needed)
+    // Always use regex-based classification
+    // FunctionGemma model is disabled due to HuggingFace access restrictions
     return this.classifyWithRegex(text)
   }
 
   isReady() {
-    return !!this.classifier
+    return !!(this.model && this.tokenizer)
   }
 }
 

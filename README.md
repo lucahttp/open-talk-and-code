@@ -10,3 +10,38 @@ Currently, two official plugins are available:
 ## Expanding the ESLint configuration
 
 If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+
+
+
+https://patorjk.com/software/taag/#p=display&f=Pagga&t=open+talk+n%27+code&x=chromostereopsis1&v=4&h=4&w=80&we=false
+
+         ███             ███             ███             ███            
+       ███░            ███░            ███░            ███░            █
+     ███░            ███░            ███░            ███░            ███
+   ███░            ███░            ███░            ███░            ███░ 
+ ███░            ███░            ███░            ███░            ███░   
+██░            ███░            ███░            ███░            ███░     
+░            ███░            ███░            ███░            ███░       
+            ░░░             ░░░             ░░░             ░░░         
+     █░█▀█░█▀█░█▀▀░█▀█░░░▀█▀░█▀█░█░░░█░█░░░█▀█░▀░░░█▀▀░█▀█░█▀▄░█▀▀   ███
+   ███░█░█░█▀▀░█▀▀░█░█░░░░█░░█▀█░█░░░█▀▄░░░█░█░░░░░█░░░█░█░█░█░█▀▀ ███░ 
+ ███░ ░▀▀▀░▀░░░▀▀▀░▀░▀░░░░▀░░▀░▀░▀▀▀░▀░▀░░░▀░▀░░░░░▀▀▀░▀▀▀░▀▀░░▀▀▀██░   
+██░            ███░            ███░            ███░            ███░     
+░            ███░            ███░            ███░            ███░       
+           ███░            ███░            ███░            ███░         
+         ███░            ███░            ███░            ███░           
+        ░░░             ░░░             ░░░             ░░░             
+ ███             ███             ███             ███             ███    
+██░            ███░            ███░            ███░            ███░     
+░            ███░            ███░            ███░            ███░       
+
+
+
+
+
+https://huggingface.co/docs/transformers.js/en/guides/private
+
+
+
+Fine tune with opencode actions
+https://github.com/google-gemma/cookbook/blob/main/FunctionGemma/%5BFunctionGemma%5DFinetune_FunctionGemma_270M_for_Mobile_Actions_with_Hugging_Face.ipynb

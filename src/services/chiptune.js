@@ -131,28 +131,38 @@ class ChiptuneService {
      */
     playTone({ frequency, type, duration, startTime, attack = 0.01, decay = 0.1, gain = 0.3 }) {
         if (!this.audioContext) return;
-        
+
         try {
+            // Ensure startTime is not negative
+            const now = this.audioContext.currentTime;
+            const actualStartTime = Math.max(now, startTime);
+
+            // Ensure duration is at least attack + decay to avoid negative times
+            const actualDuration = Math.max(duration, attack + decay + 0.01);
+
             const osc = this.audioContext.createOscillator();
             const gainNode = this.audioContext.createGain();
-            
+
             osc.type = type;
-            osc.frequency.setValueAtTime(frequency, startTime);
-            
+            osc.frequency.setValueAtTime(frequency, actualStartTime);
+
             // Envelope: Attack → Sustain → Decay
-            gainNode.gain.setValueAtTime(0, startTime);
-            gainNode.gain.linearRampToValueAtTime(gain, startTime + attack);
-            gainNode.gain.setValueAtTime(gain, startTime + duration - decay);
-            gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
-            
+            gainNode.gain.setValueAtTime(0, actualStartTime);
+            gainNode.gain.linearRampToValueAtTime(gain, actualStartTime + attack);
+
+            // Calculate decay start time (ensure it's not before attack ends)
+            const decayStart = Math.max(actualStartTime + attack, actualStartTime + actualDuration - decay);
+            gainNode.gain.setValueAtTime(gain, decayStart);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, actualStartTime + actualDuration);
+
             osc.connect(gainNode);
             gainNode.connect(this.masterGain);
-            
-            osc.start(startTime);
-            osc.stop(startTime + duration);
-            
+
+            osc.start(actualStartTime);
+            osc.stop(actualStartTime + actualDuration);
+
             // Cleanup
-            const cleanupTime = Math.max(0, (startTime + duration + 0.1) * 1000 - this.audioContext.currentTime * 1000);
+            const cleanupTime = Math.max(0, (actualStartTime + actualDuration + 0.1 - now) * 1000);
             if (cleanupTime < 10000) { // Only schedule if reasonable time
                 setTimeout(() => {
                     try {
@@ -173,27 +183,31 @@ class ChiptuneService {
         if (!this.audioContext) return;
         
         try {
+            // Ensure startTime is not negative
+            const now = this.audioContext.currentTime;
+            const actualStartTime = Math.max(now, startTime);
+            
             const osc = this.audioContext.createOscillator();
             const gainNode = this.audioContext.createGain();
             
             osc.type = type;
-            osc.frequency.setValueAtTime(startFreq, startTime);
-            osc.frequency.exponentialRampToValueAtTime(endFreq, startTime + duration);
+            osc.frequency.setValueAtTime(startFreq, actualStartTime);
+            osc.frequency.exponentialRampToValueAtTime(endFreq, actualStartTime + duration);
             
             // Quick attack/decay envelope
-            gainNode.gain.setValueAtTime(0, startTime);
-            gainNode.gain.linearRampToValueAtTime(gain, startTime + 0.01);
-            gainNode.gain.setValueAtTime(gain, startTime + duration - 0.02);
-            gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+            gainNode.gain.setValueAtTime(0, actualStartTime);
+            gainNode.gain.linearRampToValueAtTime(gain, actualStartTime + 0.01);
+            gainNode.gain.setValueAtTime(gain, actualStartTime + duration - 0.02);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, actualStartTime + duration);
             
             osc.connect(gainNode);
             gainNode.connect(this.masterGain);
             
-            osc.start(startTime);
-            osc.stop(startTime + duration);
+            osc.start(actualStartTime);
+            osc.stop(actualStartTime + duration);
             
             // Cleanup
-            const cleanupTime = Math.max(0, (startTime + duration + 0.1) * 1000 - this.audioContext.currentTime * 1000);
+            const cleanupTime = Math.max(0, (actualStartTime + duration + 0.1 - now) * 1000);
             if (cleanupTime < 10000) {
                 setTimeout(() => {
                     try {

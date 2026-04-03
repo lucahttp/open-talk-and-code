@@ -44,13 +44,20 @@ class OpenCodeAPI {
 
   // Messages
   async sendMessage(sessionId, { message, model, agent, system, tools, parts }) {
+    console.log('[OpenCode API] POST /session/' + sessionId + '/message', { message: message?.substring(0, 50), parts })
     const res = await fetch(`${this.baseUrl}/session/${sessionId}/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, model, agent, system, tools, parts })
     })
-    if (!res.ok) throw new Error(`Failed to send message: ${res.status}`)
-    return res.json()
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => 'Unknown error')
+      console.error('[OpenCode API] sendMessage failed:', res.status, errorText)
+      throw new Error(`Failed to send message: ${res.status} - ${errorText}`)
+    }
+    const data = await res.json()
+    console.log('[OpenCode API] sendMessage response:', data)
+    return data
   }
 
   async executeCommand(sessionId, { command, arguments: args, agent, model, messageID }) {

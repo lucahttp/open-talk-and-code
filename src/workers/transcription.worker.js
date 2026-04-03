@@ -7,7 +7,7 @@ import { pipeline, WhisperTextStreamer } from "@huggingface/transformers";
 // Singleton pipeline factory
 class TranscriptionPipeline {
     static task = "automatic-speech-recognition";
-    static model = "onnx-community/whisper-base";
+    static model = "Xenova/whisper-tiny"; // Public model, no token needed
     static instance = null;
 
     static async getInstance(progressCallback = null) {
