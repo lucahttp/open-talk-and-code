@@ -4,6 +4,7 @@ import { useTranscriber } from './hooks/useTranscriber'
 import { useHeyBuddy } from './hooks/useHeyBuddy'
 import { useAudioVisualization, useMultiLineVisualization } from './hooks/useAudioVisualization'
 import { useTTS } from './hooks/useTTS'
+import { useWebSocket } from './hooks/useWebSocket'
 import { HeyBuddy } from './services/HeyBuddy'
 import { pipeline, env, AutoTokenizer, AutoModelForCausalLM } from '@huggingface/transformers'
 import tts from './services/tts'
@@ -190,7 +191,8 @@ const StatusBar = ({
   activeWakeWords,
   activity,
   transcriptionMethod,
-  webSpeechSupported
+  webSpeechSupported,
+  wsConnected
 }) => {
   const getStatus = () => {
     if (isRecording) return { icon: '🔴', text: 'RECORDING', color: 'text-red-500' };
@@ -222,6 +224,11 @@ const StatusBar = ({
           {status.text}
         </span>
         {activity && <ActivityStatus activity={activity} />}
+        {wsConnected && (
+          <span className="text-xs text-purple-400 ml-2" title="WebSocket live stream active">
+            [LIVE]
+          </span>
+        )}
         {transcriptionMethod === 'webspeech' && (
           <span className="text-xs text-yellow-400 ml-2" title="Using browser Web Speech API (Whisper unavailable)">
             [FALLBACK]
@@ -358,6 +365,7 @@ const ChatLog = ({ messages, isProcessing, activity, streamingContent }) => {
             const reasoningText = getReasoningText(m.parts)
             const hasReasoning = reasoningText.length > 0
             const isExpanded = expandedReasoning.has(m.id)
+            const isWebSocket = m.source === 'websocket'
 
             return (
               <div
@@ -365,12 +373,12 @@ const ChatLog = ({ messages, isProcessing, activity, streamingContent }) => {
                 className="text-xs animate-in fade-in"
                 style={{ animationDelay: `${i * 50}ms` }}
               >
-                <div className={`font-bold ${m.role === 'user' ? 'text-terminal' : 'text-cyan-400'}`}>
-                  {m.role === 'user' ? '> YOU' : 'AI:'}
+                <div className={`font-bold ${m.role === 'user' ? 'text-terminal' : isWebSocket ? 'text-purple-400' : 'text-cyan-400'}`}>
+                  {m.role === 'user' ? '> YOU' : isWebSocket ? '📡 LIVE:' : 'AI:'}
                 </div>
-                <div className={`pl-2 ${m.role === 'user' ? 'text-terminal' : 'text-gray-300'} whitespace-pre-wrap font-mono leading-relaxed`}>
+                <div className={`pl-2 ${m.role === 'user' ? 'text-terminal' : isWebSocket ? 'text-purple-300' : 'text-gray-300'} whitespace-pre-wrap font-mono leading-relaxed`}>
                   {/* For the last assistant message during streaming, show streamingContent */}
-                  {m.role === 'assistant' && i === messages.length - 1 && streamingContent
+                  {m.role === 'assistant' && i === messages.length - 1 && streamingContent && !isWebSocket
                     ? <>{streamingContent}<span className="animate-pulse">▌</span></>
                     : (m.content || '')
                   }
@@ -730,6 +738,28 @@ function App() {
     requestMicrophonePermission,
   } = useHeyBuddy(heyBuddyOptions, handleRecordingComplete);
 
+  // WebSocket connection for live streaming
+  const WS_URL = 'ws://localhost:5174/?token=mNIbEyPo3Xli';
+  const {
+    connected: wsConnected,
+    messages: wsMessages,
+    error: wsError,
+    clearMessages: clearWsMessages,
+  } = useWebSocket(WS_URL);
+
+  // Combine OpenCode messages with WebSocket messages
+  const combinedMessages = useMemo(() => {
+    const wsChatMessages = wsMessages.map((msg, index) => ({
+      id: `ws-${msg.timestamp || index}`,
+      role: 'assistant',
+      content: msg.text || JSON.stringify(msg),
+      timestamp: msg.timestamp || Date.now(),
+      source: 'websocket',
+    }));
+    
+    return [...messages, ...wsChatMessages];
+  }, [messages, wsMessages]);
+
   // Track processed transcripts to avoid duplicates
   const processedTranscriptsRef = useRef(new Set());
 
@@ -896,6 +926,7 @@ function App() {
         activity={activity}
         transcriptionMethod={transcriptionMethod}
         webSpeechSupported={webSpeechSupported}
+        wsConnected={wsConnected}
       />
       
       {isLoading && (
@@ -947,7 +978,37 @@ function App() {
             loading={connecting}
           />
           
-          <div className="text-xs text-gray-500 mt-auto">
+          <div className="text-xs text-gray-500 mt-auto space-y-2">
+            {/* WebSocket Status */}
+            <div className="border border-gray-600 p-2">
+              <div className="text-terminal mb-1">┌─ LIVE STREAM ─┐</div>
+              <div className="flex items-center gap-2">
+                <span className={wsConnected ? 'text-terminal' : 'text-red-500'}>
+                  {wsConnected ? '●' : '○'}
+                </span>
+                <span className={wsConnected ? 'text-terminal' : 'text-gray-500'}>
+                  {wsConnected ? 'CONNECTED' : 'DISCONNECTED'}
+                </span>
+              </div>
+              {wsConnected && (
+                <div className="text-gray-600 mt-1">
+                  {wsMessages.length} messages received
+                </div>
+              )}
+              {wsError && (
+                <div className="text-red-500 text-xs mt-1">
+                  Error: {wsError}
+                </div>
+              )}
+              <button
+                onClick={clearWsMessages}
+                className="mt-2 text-xs text-gray-500 hover:text-terminal border border-gray-600 px-2 py-1"
+              >
+                [CLEAR]
+              </button>
+            </div>
+            
+            {/* Help Section */}
             <div className="border border-gray-600 p-2">
               <div className="text-terminal mb-1">┌─ HELP ─┐</div>
               <div>Say &quot;Hey Buddy&quot;</div>
@@ -968,7 +1029,7 @@ function App() {
         {/* Main area */}
         <div className="flex-1 flex flex-col min-h-0">
           <ChatLog 
-            messages={messages} 
+            messages={combinedMessages} 
             isProcessing={isOpenCodeProcessing}
             activity={activity}
             streamingContent={streamingContent}
