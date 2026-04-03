@@ -28,41 +28,50 @@ export function useOpenCode() {
       api.connectEvents()
       
       // Listen for events
-      const handleEvent = (event) => {
-        console.log('SSE Event:', event.type, event)
+      const handleEvent = (type, data) => {
+        // Handle both (type, data) and (data) signatures
+        const event = data || type;
+        const eventType = data ? type : event?.type;
+        
+        if (!event || !eventType) {
+          // Skip events without proper structure
+          return;
+        }
+        
+        console.log('SSE Event:', eventType, event)
         
         // Handle different event types
-        switch (event.type) {
+        switch (eventType) {
           case 'message.updated':
             if (event.properties?.sessionID === selectedSession?.id) {
               setMessages(prev => {
                 // Check if message already exists
-                const exists = prev.find(m => m.id === event.properties.info?.id)
+                const exists = prev.find(m => m.id === event.properties?.info?.id)
                 if (exists) {
-                  return prev.map(m => m.id === event.properties.info?.id 
-                    ? { ...m, ...event.properties.info }
+                  return prev.map(m => m.id === event.properties?.info?.id 
+                    ? { ...m, ...event.properties?.info }
                     : m
                   )
                 }
                 return [...prev, {
-                  id: event.properties.info?.id,
-                  role: event.properties.info?.role,
-                  content: event.properties.info?.content || '',
-                  parts: event.properties.parts || [],
-                  time: event.properties.info?.time
+                  id: event.properties?.info?.id,
+                  role: event.properties?.info?.role,
+                  content: event.properties?.info?.content || '',
+                  parts: event.properties?.parts || [],
+                  time: event.properties?.info?.time
                 }]
               })
             }
             break
             
           case 'session.created':
-            setSessions(prev => [...prev, event.properties.info])
+            setSessions(prev => [...prev, event.properties?.info])
             break
             
           case 'session.updated':
             setSessions(prev => prev.map(s => 
-              s.id === event.properties.info?.id 
-                ? { ...s, ...event.properties.info }
+              s.id === event.properties?.info?.id 
+                ? { ...s, ...event.properties?.info }
                 : s
             ))
             break

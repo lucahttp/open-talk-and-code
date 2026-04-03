@@ -1,8 +1,37 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useOpenCode } from './hooks/useOpenCode'
-import { useVoice } from './hooks/useVoice'
+import { useTranscriber } from './hooks/useTranscriber'
+import { useHeyBuddy } from './hooks/useHeyBuddy'
+import { useAudioVisualization, useMultiLineVisualization } from './hooks/useAudioVisualization'
+import { useTTS } from './hooks/useTTS'
 import tts from './services/tts'
+import chiptune from './services/chiptune'
+import gsap from 'gsap'
 import './index.css'
+
+// Hey Buddy Configuration - Models hosted on HuggingFace
+const ROOT_URL = "https://huggingface.co/benjamin-paine/hey-buddy/resolve/main";
+export const WAKE_WORDS = ["buddy", "hey buddy", "hi buddy", "sup buddy", "yo buddy", "okay buddy", "hello buddy"];
+
+export const COLORS = {
+  "buddy": [0, 119, 187],
+  "hey buddy": [0, 153, 136],
+  "hi buddy": [51, 227, 138],
+  "sup buddy": [238, 119, 51],
+  "yo buddy": [204, 51, 217],
+  "okay buddy": [238, 51, 119],
+  "hello buddy": [184, 62, 104],
+  "speech": [22, 200, 206],
+  "frame budget": [25, 255, 25],
+};
+
+const heyBuddyOptions = {
+  debug: false,
+  modelPath: WAKE_WORDS.map((word) => `${ROOT_URL}/models/${word.replace(' ', '-')}.onnx`),
+  vadModelPath: `${ROOT_URL}/pretrained/silero-vad.onnx`,
+  spectrogramModelPath: `${ROOT_URL}/pretrained/mel-spectrogram.onnx`,
+  embeddingModelPath: `${ROOT_URL}/pretrained/speech-embedding.onnx`,
+};
 
 // Components
 const ASCIIHeader = () => (
@@ -23,35 +52,41 @@ const ASCIIHeader = () => (
   </pre>
 )
 
-const StatusBar = ({ status, connected, sessionName, voiceStatus, error, ttsEnabled }) => {
-  const icons = {
-    idle: '🔇',
-    listening: '👂',
-    processing: '🧠',
-    speaking: '🔊',
-    error: '❌'
-  }
+const StatusBar = ({ 
+  connected, 
+  sessionName, 
+  isListening,
+  isRecording,
+  isSpeaking,
+  isTranscribing,
+  isGenerating,
+  ttsEnabled,
+  activeWakeWords
+}) => {
+  const getStatus = () => {
+    if (isRecording) return { icon: '🔴', text: 'RECORDING', color: 'text-red-500' };
+    if (isTranscribing) return { icon: '📝', text: 'TRANSCRIBING', color: 'text-cyan-400' };
+    if (isGenerating) return { icon: '🧠', text: 'THINKING', color: 'text-cyan-400' };
+    if (isSpeaking) return { icon: '🔊', text: 'SPEAKING', color: 'text-orange-400' };
+    if (isListening && activeWakeWords.length > 0) return { 
+      icon: '🎯', 
+      text: `HEY ${activeWakeWords[0].toUpperCase()}!`, 
+      color: 'text-terminal animate-pulse' 
+    };
+    if (isListening) return { icon: '👂', text: 'LISTENING', color: 'text-terminal animate-pulse' };
+    return { icon: '🔇', text: 'IDLE', color: 'text-gray-500' };
+  };
   
-  const colors = {
-    idle: 'text-gray-500',
-    listening: 'text-terminal animate-pulse',
-    processing: 'text-cyan-400',
-    speaking: 'text-orange-400',
-    error: 'text-red-500'
-  }
-
-  const displayStatus = voiceStatus === 'listening' ? 'listening' : 
-                       voiceStatus === 'processing' ? 'processing' :
-                       status
+  const status = getStatus();
   
   return (
     <div className="flex items-center justify-between border border-gray-600 p-2 mb-4 bg-black">
       <div className="flex items-center gap-2">
-        <span className={`text-lg ${colors[displayStatus] || 'text-gray-500'}`}>
-          {icons[displayStatus] || '⚪'}
+        <span className={`text-lg ${status.color}`}>
+          {status.icon}
         </span>
-        <span className={`text-sm ${colors[displayStatus] || 'text-gray-500'}`}>
-          {displayStatus?.toUpperCase() || 'IDLE'}
+        <span className={`text-sm ${status.color}`}>
+          {status.text}
         </span>
         {ttsEnabled && (
           <span className="text-xs text-orange-400 ml-2">
@@ -61,11 +96,6 @@ const StatusBar = ({ status, connected, sessionName, voiceStatus, error, ttsEnab
         {!connected && (
           <span className="text-xs text-red-500 ml-2">
             [DISCONNECTED]
-          </span>
-        )}
-        {error && (
-          <span className="text-xs text-red-500 ml-2">
-            [ERROR]
           </span>
         )}
       </div>
@@ -117,74 +147,60 @@ const SessionList = ({ sessions, selectedId, onSelect, onCreate, loading }) => (
   </div>
 )
 
-const ChatLog = ({ messages, isProcessing }) => (
-  <div className="border border-gray-600 p-2 mb-4 bg-black flex-1 overflow-y-auto min-h-0">
-    <div className="text-xs text-terminal mb-2 pb-1 border-b border-gray-600 sticky top-0 bg-black">
-      ┌─ CHAT LOG ─────────────────────────────┐
-    </div>
-    <div className="space-y-2">
-      {messages.length === 0 ? (
-        <div className="text-xs text-gray-500 italic text-center py-8">
-          Say &quot;Hey Buddy&quot; or click HOLD TO SPEAK
-        </div>
-      ) : (
-        messages.map((m, i) => (
-          <div key={m.id || i} className="text-xs">
-            <div className={`font-bold ${m.role === 'user' ? 'text-terminal' : 'text-cyan-400'}`}>
-              {m.role === 'user' ? '>' : 'AI:'}
-            </div>
-            <div className={`pl-2 ${m.role === 'user' ? 'text-terminal' : 'text-gray-300'}`}>
-              {m.content || m.parts?.map(p => p.text).join(' ') || '[Processing...]'}
-            </div>
+const ChatLog = ({ messages, isProcessing }) => {
+  const messagesEndRef = useRef(null)
+  
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+  
+  return (
+    <div className="border border-gray-600 p-2 mb-4 bg-black flex-1 overflow-y-auto min-h-0">
+      <div className="text-xs text-terminal mb-2 pb-1 border-b border-gray-600 sticky top-0 bg-black">
+        ┌─ CHAT LOG ─────────────────────────────┐
+      </div>
+      <div className="space-y-2">
+        {messages.length === 0 ? (
+          <div className="text-xs text-gray-500 italic text-center py-8">
+            Say &quot;Hey Buddy&quot; to start
           </div>
-        ))
-      )}
-      {isProcessing && (
-        <div className="text-xs text-cyan-400 animate-pulse">
-          [Thinking...]
-        </div>
-      )}
+        ) : (
+          messages.map((m, i) => (
+            <div key={m.id || i} className="text-xs animate-in fade-in slide-in-from-bottom-2">
+              <div className={`font-bold ${m.role === 'user' ? 'text-terminal' : 'text-cyan-400'}`}>
+                {m.role === 'user' ? '>' : 'AI:'}
+              </div>
+              <div className={`pl-2 ${m.role === 'user' ? 'text-terminal' : 'text-gray-300'}`}>
+                {m.content || m.parts?.map(p => p.text).join(' ') || '[Processing...]'}
+              </div>
+            </div>
+          ))
+        )}
+        {isProcessing && (
+          <div className="text-xs text-cyan-400 animate-pulse">
+            [Thinking...]
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
     </div>
-  </div>
-)
-
-const PushToTalk = ({ onPress, onRelease, disabled, status }) => (
-  <button
-    onMouseDown={onPress}
-    onMouseUp={onRelease}
-    onMouseLeave={onRelease}
-    onTouchStart={onPress}
-    onTouchEnd={onRelease}
-    disabled={disabled}
-    className={`w-full py-4 border-2 font-bold text-sm transition-colors disabled:opacity-50
-                disabled:cursor-not-allowed ${
-                  status === 'listening'
-                    ? 'border-orange-400 bg-orange-400/20 text-orange-400'
-                    : status === 'processing'
-                    ? 'border-cyan-400 bg-cyan-400/20 text-cyan-400'
-                    : 'border-terminal bg-black text-terminal active:bg-terminal active:text-black'
-                }`}
-  >
-    {status === 'listening' ? '🔴 LISTENING...' : 
-     status === 'processing' ? '⚡ PROCESSING...' :
-     '🎤 HOLD TO SPEAK'}
-  </button>
-)
+  )
+}
 
 const Controls = ({ settings, onToggle }) => (
   <div className="flex items-center justify-between text-xs border-t border-gray-600 pt-2 mt-2">
     <div className="flex gap-4">
       <button 
-        onClick={() => onToggle('wakeWord')}
-        className={`${settings.wakeWord ? 'text-terminal' : 'text-gray-500'}`}
-      >
-        [Wake: {settings.wakeWord ? 'ON' : 'OFF'}]
-      </button>
-      <button 
         onClick={() => onToggle('tts')}
         className={`${settings.tts ? 'text-terminal' : 'text-gray-500'}`}
       >
         [TTS: {settings.tts ? 'ON' : 'OFF'}]
+      </button>
+      <button 
+        onClick={() => onToggle('chiptune')}
+        className={`${settings.chiptune ? 'text-terminal' : 'text-gray-500'}`}
+      >
+        [SFX: {settings.chiptune ? 'ON' : 'OFF'}]
       </button>
     </div>
     <select 
@@ -199,14 +215,71 @@ const Controls = ({ settings, onToggle }) => (
   </div>
 )
 
+// Wake Word Visualizer Component
+const WakeWordVisualizer = ({ wakeWords }) => {
+  const canvasRef = useRef(null);
+  
+  const colors = useMemo(() => {
+    const c = {};
+    for (const word of WAKE_WORDS) {
+      c[word] = COLORS[word];
+    }
+    return c;
+  }, []);
+  
+  const { pushValue, draw } = useMultiLineVisualization(canvasRef, colors);
+  
+  useEffect(() => {
+    for (const word of WAKE_WORDS) {
+      const key = word.replace(' ', '-');
+      const probability = wakeWords[key]?.probability || 0;
+      pushValue(word, probability);
+    }
+    draw();
+  }, [wakeWords, pushValue, draw]);
+  
+  return (
+    <canvas 
+      ref={canvasRef} 
+      width={300} 
+      height={100} 
+      className="border border-gray-600 bg-black/50"
+    />
+  );
+};
+
+// Speech Visualizer Component
+const SpeechVisualizer = ({ probability }) => {
+  const canvasRef = useRef(null);
+  
+  const { pushValue, draw } = useAudioVisualization(
+    canvasRef,
+    { color: COLORS.speech }
+  );
+  
+  useEffect(() => {
+    pushValue(probability);
+    draw();
+  }, [probability, pushValue, draw]);
+  
+  return (
+    <canvas 
+      ref={canvasRef} 
+      width={300} 
+      height={50} 
+      className="border border-gray-600 bg-black/50"
+    />
+  );
+};
+
 // Main App
 function App() {
   const [settings, setSettings] = useState({
-    wakeWord: true,
     tts: true,
+    chiptune: true,
     voice: 'M1'
   })
-  const [isProcessing, setIsProcessing] = useState(false)
+  const [showPermissionPrompt, setShowPermissionPrompt] = useState(true)
   const lastMessageRef = useRef(null)
 
   // OpenCode connection
@@ -224,65 +297,100 @@ function App() {
     connect
   } = useOpenCode()
 
-  // Voice processing
+  // TTS Hook
+  const { speak: browserSpeak, cancel: cancelTTS, isSpeaking } = useTTS();
+
+  // Transcription hook
   const {
-    status: voiceStatus,
     transcript,
-    classification,
-    error: voiceError,
-    isLoading: voiceLoading,
-    startRecording,
-    stopRecording
-  } = useVoice()
+    isTranscribing,
+    isModelLoading: isTranscriberLoading,
+    progress: transcriptionProgress,
+    transcribe,
+    clear: clearTranscript,
+  } = useTranscriber();
 
-  // Set TTS voice when settings change
-  useEffect(() => {
-    tts.setVoice(settings.voice)
-  }, [settings.voice])
-
-  // Handle voice transcript and classification
-  useEffect(() => {
-    if (!transcript || !selectedSession) return
+  // Handle recording complete from Hey Buddy
+  const handleRecordingComplete = useCallback((audioSamples) => {
+    console.log('Recording complete, starting transcription...', audioSamples.length, 'samples');
+    clearTranscript();
+    transcribe(audioSamples, 'en');
     
-    console.log('Voice transcript:', transcript)
-    console.log('Classification:', classification)
-    
-    const processVoice = async () => {
-      setIsProcessing(true)
-      
-      try {
-        if (classification?.type === 'command' && classification.action) {
-          // Execute native OpenCode command
-          console.log('Executing command:', classification.action)
-          
-          if (settings.tts) {
-            tts.speak(`Executing ${classification.action} command`)
-          }
-          
-          await executeCommand(classification.action, classification.params || {})
-          
-        } else {
-          // Send as LLM query
-          console.log('Sending to LLM:', transcript)
-          
-          if (settings.tts) {
-            tts.speak('Processing your request')
-          }
-          
-          await sendMessage(transcript)
-        }
-      } catch (err) {
-        console.error('Failed to process voice:', err)
-        if (settings.tts) {
-          tts.speak('Sorry, there was an error processing your request')
-        }
-      } finally {
-        setIsProcessing(false)
-      }
+    if (settings.chiptune) {
+      chiptune.playRecordingStart();
     }
-    
-    processVoice()
-  }, [transcript, classification, selectedSession, executeCommand, sendMessage, settings.tts])
+  }, [transcribe, clearTranscript, settings.chiptune]);
+
+  // Hey Buddy hook
+  const {
+    isInitialized,
+    isRecording,
+    isListening,
+    speechProbability,
+    wakeWords,
+    permissionStatus,
+    start,
+    stop,
+    pause,
+    resume,
+    requestMicrophonePermission,
+  } = useHeyBuddy(heyBuddyOptions, handleRecordingComplete);
+
+  // Processed text ref to prevent duplicate processing
+  const processedTextRef = useRef('');
+
+  // Transcription -> OpenCode
+  useEffect(() => {
+    if (transcript?.text && !transcript.isBusy && connected && selectedSession) {
+      if (processedTextRef.current === transcript.text) return;
+
+      // Remove wake words from the beginning of the transcript
+      let cleanedText = transcript.text;
+      for (const wakeWord of WAKE_WORDS) {
+        const regex = new RegExp(`^\\s*${wakeWord}[,\\s]*`, 'i');
+        cleanedText = cleanedText.replace(regex, '').trim();
+      }
+
+      // Only send if there's actual content after removing wake word
+      if (cleanedText) {
+        console.log('Transcription complete, sending to OpenCode:', cleanedText);
+        processedTextRef.current = transcript.text;
+        
+        // Play chiptune processing sound
+        if (settings.chiptune) {
+          chiptune.playProcessing();
+        }
+        
+        // Send to OpenCode
+        sendMessage(cleanedText).then(() => {
+          if (settings.chiptune) {
+            chiptune.playSuccess();
+          }
+        }).catch(() => {
+          if (settings.chiptune) {
+            chiptune.playError();
+          }
+        });
+      }
+      clearTranscript();
+    }
+  }, [transcript, connected, selectedSession, sendMessage, clearTranscript, settings.chiptune]);
+
+  // Clear processed text when transcript is cleared
+  useEffect(() => {
+    if (!transcript?.text) {
+      processedTextRef.current = '';
+    }
+  }, [transcript]);
+
+  // Pause listening during processing/speaking
+  useEffect(() => {
+    if (isTranscribing || isSpeaking || !connected) {
+      pause();
+    } else {
+      resume();
+    }
+  }, [isTranscribing, isSpeaking, connected, pause, resume]);
 
   // Watch for new LLM responses and speak them
   useEffect(() => {
@@ -293,10 +401,50 @@ function App() {
       
       // Speak the response
       if (settings.tts && lastMessage.content) {
-        tts.speak(lastMessage.content)
+        browserSpeak(lastMessage.content);
       }
     }
-  }, [messages, settings.tts])
+  }, [messages, settings.tts, browserSpeak]);
+
+  // Permission handling
+  const handleAllowMicrophone = useCallback(async () => {
+    const granted = await requestMicrophonePermission();
+    if (granted) {
+      setShowPermissionPrompt(false);
+      await start();
+    }
+  }, [requestMicrophonePermission, start]);
+
+  // Active wake words
+  const activeWakeWords = useMemo(() => {
+    const active = [];
+    for (const word of WAKE_WORDS) {
+      const key = word.replace(' ', '-');
+      if (wakeWords[key]?.active) {
+        active.push(word);
+      }
+    }
+    return active;
+  }, [wakeWords]);
+
+  // Handle wake word detection with chiptune
+  useEffect(() => {
+    if (activeWakeWords.length > 0 && settings.chiptune) {
+      chiptune.playWakeWordDetected();
+      
+      // GSAP animation for border flash
+      gsap.fromTo('.main-container',
+        { 
+          boxShadow: '0 0 0 4px #00ff00, inset 0 0 100px rgba(0, 255, 0, 0.2)'
+        },
+        { 
+          boxShadow: '0 0 0 0px transparent, inset 0 0 0px transparent',
+          duration: 0.6,
+          ease: 'power2.out'
+        }
+      );
+    }
+  }, [activeWakeWords, settings.chiptune]);
 
   const handleCreateSession = useCallback(async () => {
     try {
@@ -306,65 +454,51 @@ function App() {
     }
   }, [createSession, sessions.length])
 
-  const handlePushToTalk = useCallback(async () => {
-    if (!selectedSession) return
-    
-    // Stop any ongoing TTS
-    tts.stop()
-    
-    try {
-      await startRecording({
-        onTranscript: (text) => {
-          console.log('Transcript received:', text)
-        },
-        onClassification: (intent) => {
-          console.log('Intent classified:', intent)
-        },
-        onError: (err) => {
-          console.error('Voice error:', err)
-        }
-      })
-    } catch (err) {
-      console.error('Failed to start recording:', err)
-    }
-  }, [selectedSession, startRecording])
-
-  const handleReleaseTalk = useCallback(async () => {
-    try {
-      await stopRecording()
-    } catch (err) {
-      console.error('Failed to stop recording:', err)
-    }
-  }, [stopRecording])
-
   const handleToggle = useCallback((key, value) => {
     if (key === 'voice') {
-      setSettings(s => ({ ...s, voice: value }))
+      setSettings(s => ({ ...s, voice: value }));
+      tts.setVoice(value);
     } else {
-      setSettings(s => ({ ...s, [key]: !s[key] }))
+      setSettings(s => ({ ...s, [key]: !s[key] }));
     }
   }, [])
 
-  const displayStatus = voiceStatus === 'listening' ? 'listening' : 
-                       voiceStatus === 'processing' ? 'processing' :
-                       'idle'
+  // Loading status
+  const isLoading = isTranscriberLoading || connecting;
 
   return (
-    <div className="w-full h-screen bg-black p-4 flex flex-col grid-bg">
+    <div className="main-container w-full h-screen bg-black p-4 flex flex-col grid-bg relative overflow-hidden">
       <ASCIIHeader />
       
       <StatusBar 
-        status={displayStatus}
         connected={connected}
         sessionName={selectedSession?.title || selectedSession?.id}
-        voiceStatus={voiceStatus}
-        error={apiError || voiceError}
+        isListening={isListening}
+        isRecording={isRecording}
+        isSpeaking={isSpeaking}
+        isTranscribing={isTranscribing}
+        isGenerating={false}
         ttsEnabled={settings.tts}
+        activeWakeWords={activeWakeWords}
       />
       
-      {voiceLoading && (
+      {isLoading && (
         <div className="text-xs text-terminal mb-2 animate-pulse">
-          [LOADING AI MODELS...]
+          [LOADING AI MODELS... {Math.round(transcriptionProgress[0]?.progress || 0)}%]
+        </div>
+      )}
+      
+      {/* Visualizers */}
+      {isInitialized && (
+        <div className="flex gap-4 mb-4">
+          <div className="flex-1">
+            <div className="text-xs text-gray-500 mb-1">Wake Word Detection</div>
+            <WakeWordVisualizer wakeWords={wakeWords} />
+          </div>
+          <div className="w-64">
+            <div className="text-xs text-gray-500 mb-1">Speech Activity</div>
+            <SpeechVisualizer probability={speechProbability} />
+          </div>
         </div>
       )}
       
@@ -383,8 +517,8 @@ function App() {
             <div className="border border-gray-600 p-2">
               <div className="text-terminal mb-1">┌─ HELP ─┐</div>
               <div>Say &quot;Hey Buddy&quot;</div>
-              <div>Or hold button</div>
-              <div className="mt-1 text-gray-600">v1.0.0</div>
+              <div>Or any wake word</div>
+              <div className="text-gray-600 mt-1">v2.0.0 (Mortimer)</div>
               {!connected && (
                 <button 
                   onClick={connect}
@@ -399,18 +533,41 @@ function App() {
         
         {/* Main area */}
         <div className="flex-1 flex flex-col min-h-0">
-          <ChatLog messages={messages} isProcessing={isProcessing} />
-          
-          <PushToTalk 
-            onPress={handlePushToTalk}
-            onRelease={handleReleaseTalk}
-            disabled={!selectedSession || !connected || voiceLoading}
-            status={voiceStatus}
+          <ChatLog 
+            messages={messages} 
+            isProcessing={isTranscribing || isSpeaking} 
           />
           
           <Controls settings={settings} onToggle={handleToggle} />
         </div>
       </div>
+      
+      {/* Permission Prompt */}
+      {showPermissionPrompt && (
+        <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50">
+          <div className="border-2 border-terminal p-6 max-w-md bg-black">
+            <h2 className="text-terminal text-lg font-bold mb-4">Microphone Permission Required</h2>
+            <p className="text-gray-400 text-sm mb-4">
+              This voice agent needs microphone access to detect wake words (&quot;Hey Buddy&quot;) 
+              and record your voice commands.
+            </p>
+            <div className="flex gap-4">
+              <button
+                onClick={handleAllowMicrophone}
+                className="flex-1 border border-terminal text-terminal py-2 hover:bg-terminal hover:text-black"
+              >
+                ALLOW MICROPHONE
+              </button>
+              <button
+                onClick={() => setShowPermissionPrompt(false)}
+                className="flex-1 border border-gray-600 text-gray-400 py-2 hover:border-red-500 hover:text-red-500"
+              >
+                CANCEL
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
