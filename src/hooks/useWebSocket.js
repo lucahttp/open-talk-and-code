@@ -12,6 +12,11 @@ export function useWebSocket(url) {
     const messageBufferRef = useRef([]);
 
     const connect = useCallback(() => {
+        if (!url) {
+            console.log('[WebSocket] No URL provided, skipping connection');
+            return;
+        }
+        
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             return;
         }

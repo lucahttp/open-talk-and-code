@@ -29,12 +29,23 @@ class ChiptuneService {
             
             // Try to resume audio context (needed for browsers that block audio)
             if (this.audioContext.state === 'suspended') {
-                await this.audioContext.resume();
+                try {
+                    await this.audioContext.resume();
+                } catch (e) {
+                    // If resume fails, audio will be initialized on first user gesture
+                    console.log('[Chiptune] AudioContext needs user gesture to start');
+                }
             }
             
-            this.initialized = true;
-            this.initAttempts = 0;
-            return true;
+            // Only mark as initialized if context is running
+            if (this.audioContext.state === 'running') {
+                this.initialized = true;
+                this.initAttempts = 0;
+                return true;
+            }
+            
+            // Context is created but suspended - will be resumed on first play
+            return false;
         } catch (err) {
             console.warn('Failed to initialize audio:', err);
             this.initAttempts++;
@@ -49,7 +60,19 @@ class ChiptuneService {
         // Try to initialize if not already done
         if (!this.initialized) {
             const success = await this.init();
-            if (!success && this.initAttempts > 3) {
+            
+            // If context exists but is suspended, try to resume it (requires user gesture)
+            if (!success && this.audioContext && this.audioContext.state === 'suspended') {
+                try {
+                    await this.audioContext.resume();
+                    this.initialized = true;
+                } catch (e) {
+                    console.warn('[Chiptune] Cannot play - user interaction needed first');
+                    return;
+                }
+            }
+            
+            if (!this.initialized && this.initAttempts > 3) {
                 // Give up after 3 attempts
                 return;
             }
@@ -70,6 +93,75 @@ class ChiptuneService {
         } catch (err) {
             console.warn('Audio play failed:', err);
         }
+    }
+
+    /**
+     * Grace Period Reset Sound - "Revive" style from video games
+     * Ascending arpeggio que suena como recuperar vida/resetear estado
+     * Style: 8-bit RPG "item get" o "continue" sound
+     */
+    playGracePeriodReset() {
+        this.safePlay(() => {
+            const now = this.audioContext.currentTime;
+            
+            // Arpeggio ascendente rápido tipo "1-up" o "continue"
+            const notes = [440, 554, 659, 880]; // A, C#, E, A (acorde mayor)
+            
+            notes.forEach((freq, i) => {
+                this.playTone({
+                    frequency: freq,
+                    type: 'square',
+                    duration: 0.08,
+                    startTime: now + (i * 0.04),
+                    attack: 0.005,
+                    decay: 0.06,
+                    gain: 0.25
+                });
+            });
+            
+            // Final "sparkle" note
+            this.playTone({
+                frequency: 1760, // High A octave above
+                type: 'sine',
+                duration: 0.15,
+                startTime: now + 0.18,
+                attack: 0.01,
+                decay: 0.12,
+                gain: 0.2
+            });
+        });
+    }
+
+    /**
+     * Wake Word Start Recording - Feedback de que empezó a grabar
+     * Distinto del playWakeWordDetected (ese es del modelo detectando)
+     * Este es para indicar al usuario "estoy escuchándote ahora"
+     */
+    playStartRecording() {
+        this.safePlay(() => {
+            const now = this.audioContext.currentTime;
+            
+            // Sonido de "comienzo" tipo scanner/sonar
+            // Slide descendente corto
+            this.playSlideTone({
+                startFreq: 600,
+                endFreq: 300,
+                type: 'sine',
+                duration: 0.15,
+                startTime: now,
+                gain: 0.25
+            });
+            
+            // Eco sutil
+            this.playSlideTone({
+                startFreq: 600,
+                endFreq: 300,
+                type: 'sine',
+                duration: 0.12,
+                startTime: now + 0.08,
+                gain: 0.15
+            });
+        });
     }
 
     /**

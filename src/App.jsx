@@ -5,10 +5,18 @@ import { useHeyBuddy } from './hooks/useHeyBuddy'
 import { useAudioVisualization, useMultiLineVisualization } from './hooks/useAudioVisualization'
 import { useTTS } from './hooks/useTTS'
 import { useWebSocket } from './hooks/useWebSocket'
+import { useConversationStateMachine, STATES } from './hooks/useConversationStateMachine'
+import { useGracePeriodProcessor } from './hooks/useGracePeriodProcessor'
+import { useBargeInTTS } from './hooks/useBargeInTTS'
+import { useQuickListen } from './hooks/useQuickListen'
+import { GracePeriodBar } from './components/GracePeriodBar'
+import { SpeakingGlowBorder } from './components/SpeakingGlowBorder'
+import { QuickListenBar } from './components/QuickListenBar'
 import { HeyBuddy } from './services/HeyBuddy'
 import { pipeline, env, AutoTokenizer, AutoModelForCausalLM } from '@huggingface/transformers'
 import tts from './services/tts'
 import chiptune from './services/chiptune'
+import intentClassifier from './services/intent'
 import gsap from 'gsap'
 import './index.css'
 
@@ -699,21 +707,37 @@ function App() {
   // Track if we're using Web Speech API fallback
   const isWebSpeechFallback = transcriptionMethod === 'webspeech';
 
+  // Refs for conversation state (to avoid initialization order issues)
+  const conversationStateRef = useRef('idle');
+  const STATESRef = useRef({});
+  
+  // Ref to track if grace recorder is active (to ignore HeyBuddy callbacks)
+  const graceRecorderActiveRef = useRef(false);
+
+  // Ref for processGracePeriodAudio to avoid initialization order issues
+  const processGracePeriodAudioRef = useRef(null);
+
   // Handle recording complete from Hey Buddy
+  // If grace period processing is active, pass audio to processor
+  // Otherwise use legacy transcription flow
   const handleRecordingComplete = useCallback((audioSamples) => {
-    console.log('Recording complete, starting transcription...', audioSamples.length, 'samples');
+    console.log('[App] Recording complete from HeyBuddy:', audioSamples.length, 'samples');
     
-    // Check if we should use Web Speech API (forced or fallback)
+    // If grace period processing is active, pass audio to processor
+    if (graceRecorderActiveRef.current && processGracePeriodAudioRef.current) {
+      console.log('[App] Passing audio to grace period processor');
+      processGracePeriodAudioRef.current(audioSamples);
+      return;
+    }
+    
+    // Legacy flow: Transcribe directly
+    console.log('[App] Using legacy transcription flow');
+    
     const useWebSpeech = settings.forceWebSpeech || transcriptionMethod === 'webspeech';
     
-    // If Whisper failed or forced to use Web Speech API, use it instead
     if (useWebSpeech && webSpeechSupported) {
-      console.log('[App] Using Web Speech API for transcription');
-      // Web Speech API will be started via transcribeWithWebSpeech
-      // We need to trigger it here since we can't use the audio samples
       transcribeWithWebSpeech('en-US');
     } else {
-      // Use Whisper (normal flow)
       clearTranscript();
       transcribe(audioSamples, 'en');
     }
@@ -721,7 +745,7 @@ function App() {
     if (settings.chiptune) {
       chiptune.playRecordingStart();
     }
-  }, [transcribe, clearTranscript, settings.chiptune, settings.forceWebSpeech, transcriptionMethod, webSpeechSupported, transcribeWithWebSpeech]);
+  }, [settings.forceWebSpeech, transcriptionMethod, webSpeechSupported, settings.chiptune, transcribeWithWebSpeech, clearTranscript, transcribe]);
 
   // Hey Buddy hook
   const {
@@ -738,14 +762,322 @@ function App() {
     requestMicrophonePermission,
   } = useHeyBuddy(heyBuddyOptions, handleRecordingComplete);
 
+  // Ref for handleWakeWordDetected to avoid initialization order issues
+  const handleWakeWordDetectedRef = useRef(null);
+
+  // Watch for wake word detection from HeyBuddy
+  const prevWakeWordsRef = useRef({});
+  useEffect(() => {
+    // Check if any wake word is detected
+    const detectedWakeWord = Object.entries(wakeWords).find(([word, active]) => active);
+    const prevDetected = Object.entries(prevWakeWordsRef.current).find(([word, active]) => active);
+    
+    if (detectedWakeWord && !prevDetected && handleWakeWordDetectedRef.current) {
+      console.log('[App] Wake word detected:', detectedWakeWord[0]);
+      handleWakeWordDetectedRef.current();
+    }
+    
+    prevWakeWordsRef.current = { ...wakeWords };
+  }, [wakeWords]);
+
   // WebSocket connection for live streaming
-  const WS_URL = 'ws://localhost:5174/?token=mNIbEyPo3Xli';
+  const WS_URL = selectedSession?.id 
+    ? `ws://localhost:4096/share_poll?id=${selectedSession.id}`
+    : null;
   const {
     connected: wsConnected,
     messages: wsMessages,
     error: wsError,
     clearMessages: clearWsMessages,
   } = useWebSocket(WS_URL);
+
+  // New Conversation State Machine
+  const {
+    state: conversationState,
+    STATES,
+    graceSeconds,
+    quickListenSeconds,
+    isListeningForBargeIn,
+    currentParagraph,
+    totalParagraphs,
+    startRecording: startConversationRecording,
+    startGracePeriod,
+    interruptGracePeriod,
+    startTranscribing,
+    startSending,
+    startSpeaking,
+    updateParagraph,
+    onBargeIn,
+    resumeFromPause,
+    onSpeakingComplete,
+    onQuickListenTranscript,
+    cancelQuickListen,
+    resetToIdle,
+  } = useConversationStateMachine({
+    onStateChange: (newState, data) => {
+      console.log('[App] Conversation state:', newState, data);
+      // Update ref for handleRecordingComplete access
+      conversationStateRef.current = newState;
+    },
+    onGracePeriodTick: (seconds) => {
+      // Play chiptune on reset
+      if (seconds === 5 && settings.chiptune) {
+        chiptune.playGracePeriodReset();
+      }
+    },
+    onQuickListenTick: (seconds) => {
+      // Could play warning sound at 3s remaining
+    },
+  });
+
+  // Update STATES ref after initialization
+  useEffect(() => {
+    STATESRef.current = STATES;
+  }, [STATES]);
+
+  // Ref for resumeHeyBuddy to avoid initialization order issues
+  const resumeHeyBuddyRef = useRef(null);
+
+  // Grace Period Processor Hook (receives audio from HeyBuddy)
+  const {
+    processAudio: processGracePeriodAudio,
+    isProcessing: isGraceProcessing,
+    isInGracePeriod,
+    graceSeconds: processorGraceSeconds,
+    resetState: resetGraceProcessor,
+  } = useGracePeriodProcessor({
+    onComplete: async (audioBuffer) => {
+      // Reset flag
+      graceRecorderActiveRef.current = false;
+      console.log('[App] Grace period completed, deactivating flag');
+      
+      if (!audioBuffer) {
+        resetToIdle();
+        return;
+      }
+      
+      startTranscribing();
+      
+      // Convert and transcribe
+      try {
+        const audioData = audioBuffer.getChannelData(0);
+        clearTranscript();
+        transcribe(audioData, 'en');
+      } catch (err) {
+        console.error('[App] Transcription error:', err);
+        resetToIdle();
+      }
+    },
+    onGraceTick: (seconds) => {
+      // Sync with state machine
+      if (seconds < 5 && conversationState === STATES.RECORDING) {
+        startGracePeriod();
+      }
+    },
+    onInterrupt: () => {
+      interruptGracePeriod();
+    },
+  });
+
+  // Update ref for processGracePeriodAudio
+  useEffect(() => {
+    processGracePeriodAudioRef.current = processGracePeriodAudio;
+  }, [processGracePeriodAudio]);
+
+  // Barge-in TTS Hook
+  const {
+    speakParagraphs,
+    pause: pauseTTS,
+    resume: resumeTTS,
+    stop: stopBargeInTTS,
+    isSpeaking: isBargeInSpeaking,
+    isPaused: isTTSPaused,
+    currentParagraph: bargeInCurrentParagraph,
+    totalParagraphs: bargeInTotalParagraphs,
+  } = useBargeInTTS({
+    onBargeIn: (command) => {
+      onBargeIn(command);
+      if (command === 'stop') {
+        stopBargeInTTS();
+        // Start quick listen
+        startQuickListenTimer();
+      } else if (command === 'pause') {
+        pauseTTS();
+      }
+    },
+    onComplete: () => {
+      onSpeakingComplete();
+      startQuickListenTimer();
+    },
+    onParagraph: (index) => {
+      updateParagraph(index);
+    },
+  });
+
+  // Quick Listen Hook
+  const {
+    start: startQuickListenHook,
+    stop: stopQuickListen,
+    secondsRemaining: hookQuickListenSeconds,
+    transcript: quickListenTranscript,
+  } = useQuickListen({
+    duration: 15000,
+    onTranscript: (text) => {
+      onQuickListenTranscript(text);
+      handleQuickListenMessage(text);
+    },
+    onTimeout: () => {
+      resetToIdle();
+      // Reset grace processor flag after timeout
+      graceRecorderActiveRef.current = false;
+      resetGraceProcessor();
+    },
+    onCancel: () => {
+      cancelQuickListen();
+      // Reset grace processor flag after cancel
+      graceRecorderActiveRef.current = false;
+      resetGraceProcessor();
+    },
+  });
+
+  // Start quick listen helper
+  const startQuickListenTimer = useCallback(() => {
+    if (settings.chiptune) {
+      chiptune.playStartRecording(); // Indicate we're listening
+    }
+    startQuickListenHook();
+  }, [startQuickListenHook, settings.chiptune]);
+
+  // Handle message from quick listen
+  const handleQuickListenMessage = useCallback(async (text) => {
+    if (!text.trim() || !connected || !selectedSession) return;
+    
+    // Classify intent
+    const intent = await intentClassifier.classify(text);
+    
+    if (intent.type === 'command' && (intent.action === '/interrupt' || intent.action === '/stop')) {
+      resetToIdle();
+      // Reset grace processor flag
+      graceRecorderActiveRef.current = false;
+      resetGraceProcessor();
+      return;
+    }
+    
+    // Send as normal message
+    startSending();
+    try {
+      await sendMessage(text);
+      // Response will come through SSE and trigger TTS
+      // Grace processor flag will be reset after TTS completes
+    } catch (err) {
+      console.error('[App] Quick listen send error:', err);
+      resetToIdle();
+      // Reset grace processor flag on error
+      graceRecorderActiveRef.current = false;
+      resetGraceProcessor();
+    }
+  }, [connected, selectedSession, sendMessage, startSending, resetToIdle, resetGraceProcessor]);
+
+  // Modified wake word handler - activates grace period processing mode
+  // Note: We don't pause HeyBuddy to keep its visualizer active
+  const handleWakeWordDetected = useCallback(() => {
+    if (conversationState === STATES.IDLE || conversationState === STATES.QUICK_LISTEN) {
+      // Stop any ongoing quick listen
+      if (conversationState === STATES.QUICK_LISTEN) {
+        stopQuickListen();
+        resetGraceProcessor();
+      }
+      
+      // Play wake word chiptune
+      if (settings.chiptune) {
+        chiptune.playWakeWordDetected();
+      }
+      
+      // Mark grace processor as active (to process HeyBuddy audio with grace period)
+      graceRecorderActiveRef.current = true;
+      console.log('[App] Grace period processing activated, waiting for HeyBuddy audio');
+      
+      // Start the conversation flow
+      startConversationRecording();
+    }
+  }, [conversationState, startConversationRecording, stopQuickListen, settings.chiptune, resetGraceProcessor]);
+
+  // Wrapper function to resume HeyBuddy and reset grace recorder flag
+  const resumeHeyBuddy = useCallback(() => {
+    graceRecorderActiveRef.current = false;
+    console.log('[App] Grace recorder deactivated, HeyBuddy callbacks enabled');
+    resume();
+  }, [resume]);
+
+  // Update ref for the wake word detection useEffect
+  useEffect(() => {
+    handleWakeWordDetectedRef.current = handleWakeWordDetected;
+  }, [handleWakeWordDetected]);
+
+  // Update the original recording complete handler
+  useEffect(() => {
+    // When transcriber has a final result
+    if (transcript?.text && !transcript.isBusy && conversationState === STATES.TRANSCRIBING) {
+      const text = transcript.text;
+      
+      // Remove wake words
+      let cleanedText = text;
+      for (const wakeWord of WAKE_WORDS) {
+        const regex = new RegExp(`^\\s*${wakeWord}[,\\s]*`, 'i');
+        cleanedText = cleanedText.replace(regex, '').trim();
+      }
+      
+      if (cleanedText) {
+        console.log('[App] Sending to OpenCode:', cleanedText);
+        startSending();
+        
+        sendMessage(cleanedText).then(() => {
+          if (settings.chiptune) {
+            chiptune.playSuccess();
+          }
+          // Reset grace processor flag after message sent successfully
+          graceRecorderActiveRef.current = false;
+          resetGraceProcessor();
+        }).catch((err) => {
+          console.error('[App] Send failed:', err);
+          if (settings.chiptune) {
+            chiptune.playError();
+          }
+          resetToIdle();
+          // Reset grace processor flag on error too
+          graceRecorderActiveRef.current = false;
+          resetGraceProcessor();
+        });
+      } else {
+        // No content, reset flag
+        resetToIdle();
+        graceRecorderActiveRef.current = false;
+        resetGraceProcessor();
+      }
+      
+      clearTranscript();
+    }
+  }, [transcript, conversationState, sendMessage, clearTranscript, startSending, resetToIdle, settings.chiptune, resetGraceProcessor]);
+
+  // Watch for OpenCode responses and speak them
+  useEffect(() => {
+    const lastMessage = messages[messages.length - 1];
+    
+    if (lastMessage && lastMessage.role === 'assistant' && lastMessage.id !== lastMessageRef.current) {
+      lastMessageRef.current = lastMessage.id;
+      
+      if (settings.tts && lastMessage.content) {
+        // Start speaking state
+        const paragraphs = lastMessage.content
+          .split(/\n\n+|(?<=[.!?])\s+(?=[A-Z])/)
+          .map(p => p.trim())
+          .filter(p => p.length > 0);
+        
+        startSpeaking(paragraphs.length);
+        speakParagraphs(lastMessage.content);
+      }
+    }
+  }, [messages, settings.tts, startSpeaking, speakParagraphs]);
 
   // Combine OpenCode messages with WebSocket messages
   const combinedMessages = useMemo(() => {
@@ -1044,6 +1376,23 @@ function App() {
         </div>
       </div>
       
+      {/* Grace Period Indicator */}
+      <GracePeriodBar 
+        seconds={graceSeconds} 
+        isActive={conversationState === STATES.GRACE_PERIOD} 
+      />
+      
+      {/* Speaking Glow Border */}
+      <SpeakingGlowBorder 
+        isActive={conversationState === STATES.SPEAKING || conversationState === STATES.QUICK_LISTEN} 
+      />
+      
+      {/* Quick Listen Bar */}
+      <QuickListenBar 
+        secondsRemaining={quickListenSeconds} 
+        isActive={conversationState === STATES.QUICK_LISTEN} 
+      />
+
       {/* Permission Prompt */}
       {showPermissionPrompt && (
         <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50">
