@@ -60,26 +60,10 @@ export class HeyBuddy {
         const wakeWordEmbeddingFrames = options.wakeWordEmbeddingFrames || 16;
 
         // Initialize shared models
-        this.vad = new SileroVAD(
-            vadModelPath,
-            targetSampleRate,
-            options.positiveVadThreshold,
-            options.negativeVadThreshold,
-            options.negativeVadCount
-        );
-        this.vad.test(this.debug);
-
+        this.vad = new SileroVAD(vadModelPath, targetSampleRate, options.positiveVadThreshold, options.negativeVadThreshold, options.negativeVadCount);
         this.spectrogram = new MelSpectrogram(spectrogramModelPath);
-        this.spectrogram.test(this.debug);
         this.spectrogramMelBins = spectrogramMelBins;
-
-        this.embedding = new SpeechEmbedding(
-            embeddingModelPath,
-            embeddingDim,
-            embeddingWindowSize,
-            embeddingWindowStride
-        );
-        this.embedding.test(this.debug);
+        this.embedding = new SpeechEmbedding(embeddingModelPath, embeddingDim, embeddingWindowSize, embeddingWindowStride);
         this.embeddingDim = embeddingDim;
         this.embeddingWindowSize = embeddingWindowSize;
         this.embeddingWindowStride = embeddingWindowStride;
@@ -93,15 +77,13 @@ export class HeyBuddy {
         for (let model of modelArray) {
             let modelName = model.split("/").pop().split(".")[0];
             this.wakeWords[modelName] = new WakeWord(model, this.wakeWordThreshold);
-            this.wakeWords[modelName].test(this.debug);
         }
 
         // Initialize state
         this.recording = false;
         this.paused = false;
+        this.isProcessingBatch = false;
         this.audioBuffer = null;
-        this.frameIntervalEma = 0;
-        this.frameIntervalEmaWeight = 0.1;
         this.frameTimeEma = 0;
         this.frameTimeEmaWeight = 0.1;
 
@@ -112,15 +94,18 @@ export class HeyBuddy {
         this.detectedCallbacks = [];
 
         // Initialize batcher
-        this.batcher = new AudioBatcher(
-            batchSeconds,
-            batchIntervalSeconds,
-            targetSampleRate
-        );
+        this.batcher = new AudioBatcher(batchSeconds, batchIntervalSeconds, targetSampleRate);
         this.batcher.onBatch((batch) => this.process(batch));
     }
 
+    async waitUntilReady() {
+        const models = [this.vad, this.spectrogram, this.embedding, ...Object.values(this.wakeWords)];
+        await Promise.all(models.map(m => m.waitUntilLoaded()));
+        return true;
+    }
+
     async start() {
+        await this.waitUntilReady();
         await this.batcher.initialize();
     }
 
@@ -128,233 +113,129 @@ export class HeyBuddy {
         this.batcher.destroy();
     }
 
-    pause() {
-        this.paused = true;
-    }
+    pause() { this.paused = true; }
+    resume() { this.paused = false; }
 
-    resume() {
-        this.paused = false;
-    }
-
-    get chunkedWakeWords() {
-        return Object.keys(this.wakeWords).reduce((carry, name, i) => {
-            const chunkIndex = Math.floor(i / this.wakeWordThreads);
-            if (!carry[chunkIndex]) {
-                carry[chunkIndex] = [];
-            }
-            carry[chunkIndex].push(name);
-            return carry;
-        }, []);
-    }
-
-    onDetected(names, callback) {
-        this.detectedCallbacks.push({ names, callback });
-    }
-
-    onProcessed(callback) {
-        this.processedCallbacks.push(callback);
-    }
-
-    onSpeechStart(callback) {
-        this.speechStartCallbacks.push(callback);
-    }
-
-    onSpeechEnd(callback) {
-        this.speechEndCallbacks.push(callback);
-    }
-
-    onRecording(callback) {
-        this.recordingCallbacks.push(callback);
-    }
+    onDetected(names, callback) { this.detectedCallbacks.push({ names, callback }); }
+    onProcessed(callback) { this.processedCallbacks.push(callback); }
+    onSpeechStart(callback) { this.speechStartCallbacks.push(callback); }
+    onSpeechEnd(callback) { this.speechEndCallbacks.push(callback); }
+    onRecording(callback) { this.recordingCallbacks.push(callback); }
 
     speechStart() {
-        if (this.debug) {
-            console.log("Speech start");
-        }
-        for (let callback of this.speechStartCallbacks) {
-            callback();
-        }
+        if (this.debug) console.log("Speech start");
+        for (let callback of this.speechStartCallbacks) callback();
+    }
+
+    startRecording() {
+        this.recording = true;
+        this.audioBuffer = null;
+    }
+
+    stopRecording() {
+        this.recording = false;
+        this.audioBuffer = null;
     }
 
     speechEnd() {
-        if (this.debug) {
-            console.log("Speech end");
-        }
-        for (let callback of this.speechEndCallbacks) {
-            callback();
-        }
-        if (this.recording) {
-            this.dispatchRecording();
-            this.recording = false;
-        }
+        if (this.debug) console.log("Speech end");
+        for (let callback of this.speechEndCallbacks) callback();
+        if (this.recording) this.dispatchRecording();
     }
 
     dispatchRecording() {
-        if (this.audioBuffer === null) {
-            console.error("No recording to dispatch");
-            return;
-        }
-        if (this.debug) {
-            const recordingLength = this.audioBuffer.length;
-            const recordedDuration = recordingLength / this.batcher.targetSampleRate;
-            console.log(
-                `Dispatching recording with ${recordingLength} frames (${recordedDuration} s)`
-            );
-        }
-        for (let callback of this.recordingCallbacks) {
-            callback(this.audioBuffer);
-        }
+        if (this.audioBuffer === null) return;
+        for (let callback of this.recordingCallbacks) callback(this.audioBuffer);
         this.audioBuffer = null;
     }
 
     wakeWordDetected(name) {
         const now = Date.now();
-        if (
-            this.wakeWordTimes[name] &&
-            now - this.wakeWordTimes[name] < this.wakeWordInterval * 1000
-        ) {
-            return;
-        }
-        if (this.debug) {
-            console.log("Wake word detected:", name);
-        }
+        if (this.wakeWordTimes[name] && now - this.wakeWordTimes[name] < this.wakeWordInterval * 1000) return;
+        if (this.debug) console.log("Wake word detected:", name);
         this.recording = true;
         this.wakeWordTimes[name] = now;
-
         for (let { names, callback } of this.detectedCallbacks) {
-            if ((Array.isArray(names) && names.includes(name)) || names === name) {
-                callback();
-            }
+            if ((Array.isArray(names) && names.includes(name)) || names === name) callback();
         }
     }
 
     processed(data) {
-        for (let callback of this.processedCallbacks) {
-            callback(data);
-        }
-    }
-
-    async checkWakeWordSubset(wakeWordNames) {
-        return await Promise.all(
-            wakeWordNames.map((name) =>
-                this.wakeWords[name].checkWakeWordCalled(this.embeddingBuffer)
-            )
-        );
+        for (let callback of this.processedCallbacks) callback(data);
     }
 
     async checkWakeWords() {
         const returnMap = {};
-        for (let nameChunk of this.chunkedWakeWords) {
-            const wakeWordsCalled = await this.checkWakeWordSubset(nameChunk);
-            for (let i = 0; i < nameChunk.length; i++) {
-                const name = nameChunk[i];
-                const wordCalled = wakeWordsCalled[i];
-                returnMap[name] = wordCalled;
-            }
-        }
-        for (let name in returnMap) {
-            if (returnMap[name].detected) {
-                this.wakeWordDetected(name);
-            }
+        // Process wake words one by one to avoid session conflicts in WASM
+        for (let name in this.wakeWords) {
+            const wordCalled = await this.wakeWords[name].checkWakeWordCalled(this.embeddingBuffer);
+            returnMap[name] = wordCalled;
+            if (wordCalled.detected) this.wakeWordDetected(name);
         }
         return returnMap;
     }
 
     async process(audio) {
-        // Skip processing when paused
-        if (this.paused) {
-            return;
-        }
+        if (this.paused || this.isProcessingBatch) return;
+        this.isProcessingBatch = true;
 
-        this.frameStart = new Date().getTime();
+        try {
+            const startTime = Date.now();
+            const lastBatch = audio.subarray(audio.length - this.batcher.batchIntervalSamples);
 
-        if (this.frameEnd !== undefined && this.frameEnd !== null) {
-            this.frameInterval = this.frameStart - this.frameEnd;
-        } else {
-            this.frameInterval = 0;
-        }
-        if (this.frameIntervalEma === 0) {
-            this.frameIntervalEma = this.frameInterval;
-        } else {
-            this.frameIntervalEma =
-                this.frameIntervalEma * (1 - this.frameIntervalEmaWeight) +
-                this.frameInterval * this.frameIntervalEmaWeight;
-        }
+            const spectrograms = await this.spectrogram.run(audio);
+            const embedding = await this.embedding.getEmbeddingFromMelSpectrogramOutput(spectrograms);
+            
+            const numFramesPerEmbedding = embedding.dims[0];
+            const maxEmbeddings = this.wakeWordEmbeddingFrames / numFramesPerEmbedding;
 
-        const lastBatch = audio.subarray(
-            audio.length - this.batcher.batchIntervalSamples
-        );
+            this.embeddingBufferArray.push(embedding);
+            if (this.embeddingBufferArray.length > maxEmbeddings) this.embeddingBufferArray.shift();
 
-        const spectrograms = await this.spectrogram.run(audio);
-        const embedding = await this.embedding.getEmbeddingFromMelSpectrogramOutput(
-            spectrograms
-        );
-        const numFramesPerEmbedding = embedding.dims[0];
-        const maxEmbeddings = this.wakeWordEmbeddingFrames / numFramesPerEmbedding;
+            this.embeddingBuffer = await embeddingBufferArrayToEmbedding(
+                this.embeddingBufferArray,
+                numFramesPerEmbedding,
+                this.embeddingDim
+            );
 
-        this.embeddingBufferArray.push(embedding);
-        if (this.embeddingBufferArray.length > maxEmbeddings)
-            this.embeddingBufferArray.shift();
+            const { isSpeaking, speechProbability, justStoppedSpeaking, justStartedSpeaking } =
+                await this.vad.hasSpeechAudio(lastBatch);
 
-        this.embeddingBuffer = await embeddingBufferArrayToEmbedding(
-            this.embeddingBufferArray,
-            numFramesPerEmbedding,
-            this.embeddingDim
-        );
-        const { isSpeaking, speechProbability, justStoppedSpeaking, justStartedSpeaking } =
-            await this.vad.hasSpeechAudio(lastBatch);
+            if (justStartedSpeaking) this.speechStart();
+            if (justStoppedSpeaking) this.speechEnd();
 
-        if (justStartedSpeaking) this.speechStart();
-        if (justStoppedSpeaking) this.speechEnd();
+            let wakeWordsCalled = {};
+            if (isSpeaking && this.embeddingBuffer.dims[0] === this.wakeWordEmbeddingFrames) {
+                wakeWordsCalled = await this.checkWakeWords();
+            }
 
-        if (
-            isSpeaking &&
-            this.embeddingBuffer.dims[0] === this.wakeWordEmbeddingFrames
-        ) {
-            const wakeWordsCalled = await this.checkWakeWords();
             this.processed({
-                listening: true,
+                listening: isSpeaking,
                 recording: this.recording,
                 speech: { probability: speechProbability, active: isSpeaking },
                 wakeWords: wakeWordsCalled,
             });
-        } else {
-            this.processed({
-                listening: false,
-                recording: this.recording,
-                speech: { probability: speechProbability, active: isSpeaking },
-                wakeWords: Object.entries(this.wakeWords).reduce((carry, [name]) => {
-                    carry[name] = {
-                        probability: 0.0,
-                        active: false,
-                    };
-                    return carry;
-                }, {}),
-            });
-        }
 
-        if (this.recording) {
-            if (this.audioBuffer === null) {
-                this.audioBuffer = new Float32Array(audio.length);
-                this.audioBuffer.set(audio);
-            } else {
-                const concatenated = new Float32Array(
-                    this.audioBuffer.length + lastBatch.length
-                );
-                concatenated.set(this.audioBuffer);
-                concatenated.set(lastBatch, this.audioBuffer.length);
-                this.audioBuffer = concatenated;
+            if (this.recording) {
+                if (this.audioBuffer === null) {
+                    this.audioBuffer = new Float32Array(audio.length);
+                    this.audioBuffer.set(audio);
+                } else {
+                    const concatenated = new Float32Array(this.audioBuffer.length + lastBatch.length);
+                    concatenated.set(this.audioBuffer);
+                    concatenated.set(lastBatch, this.audioBuffer.length);
+                    this.audioBuffer = concatenated;
+                }
             }
-        }
 
-        this.frameEnd = new Date().getTime();
-        this.frameTime = this.frameEnd - this.frameStart;
-        if (this.frameTimeEma === 0) {
-            this.frameTimeEma = this.frameTime;
-        } else {
-            this.frameTimeEma =
-                this.frameTimeEma * (1 - this.frameTimeEmaWeight) +
-                this.frameTime * this.frameTimeEmaWeight;
+            const executionTime = Date.now() - startTime;
+            if (this.frameTimeEma === 0) this.frameTimeEma = executionTime;
+            else this.frameTimeEma = (1.0 - this.frameTimeEmaWeight) * this.frameTimeEma + executionTime * this.frameTimeEmaWeight;
+
+        } catch (err) {
+            console.error('[HeyBuddy] Processing error:', err);
+        } finally {
+            this.isProcessingBatch = false;
         }
     }
 }

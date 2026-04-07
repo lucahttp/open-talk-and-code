@@ -393,12 +393,14 @@ export function useOpenCode() {
   }, [sessions])
 
   // Send message to session
-  const sendMessage = useCallback(async (content) => {
-    if (!selectedSession) {
+  const sendMessage = useCallback(async (content, options = {}) => {
+    const targetSessionId = options.sessionId || selectedSession?.id
+    
+    if (!targetSessionId) {
       throw new Error('No session selected')
     }
 
-    console.log('[OpenCode] Sending message to session:', selectedSession.id, 'content:', content.substring(0, 50))
+    console.log('[OpenCode] Sending message to session:', targetSessionId, 'content:', content.substring(0, 50))
 
     const tempId = `temp_${Date.now()}`
 
@@ -423,7 +425,7 @@ export function useOpenCode() {
       })
 
       // Send to OpenCode
-      const response = await api.sendMessage(selectedSession.id, {
+      const response = await api.sendMessage(targetSessionId, {
         message: content,
         parts: [{ type: 'text', text: content }]
       })

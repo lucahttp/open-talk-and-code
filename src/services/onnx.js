@@ -1,15 +1,14 @@
 /** @module onnx */
 import { sleep } from "./helpers";
+import { MutexLock } from "./mutex";
 
 let initialized = false;
 let Tensor, InferenceSession;
+const sessionMutex = new MutexLock();
 
-// Initialize ONNX Runtime from CDN (loaded via script tag in index.html)
-if (typeof window !== "undefined" && typeof window.ort !== "undefined") {
-    initialized = true;
-    Tensor = window.ort.Tensor;
-    InferenceSession = window.ort.InferenceSession;
-}
+// Global cache for sessions and their individual locks
+const sessionCache = new Map();
+const sessionLocks = new Map();
 
 /**
  * Wrapper for ONNX Runtime Web API.
@@ -20,29 +19,39 @@ export class ONNX {
      */
     static initialize() {
         if (!initialized && typeof window !== "undefined" && typeof window.ort !== "undefined") {
+            const ort = window.ort;
+            // Configure WASM paths
+            ort.env.wasm.wasmPaths = '/wasm/';
+            // Force single thread for maximum stability in real-time audio
+            ort.env.wasm.numThreads = 1;
+            // Disable proxy to avoid worker overhead for small models
+            ort.env.wasm.proxy = false;
+            
+            Tensor = ort.Tensor;
+            InferenceSession = ort.InferenceSession;
             initialized = true;
-            Tensor = window.ort.Tensor;
-            InferenceSession = window.ort.InferenceSession;
+            console.log('[ONNX] Runtime initialized (Single-thread WASM mode)');
         }
     }
 
     /**
      * Wait for the ONNX Runtime Web API to be initialized.
-     * @returns {Promise<void>}
      */
     static async waitForInitialization() {
-        while (!initialized) {
+        let attempts = 0;
+        while (!initialized && attempts < 100) {
             ONNX.initialize();
-            await sleep(10);
+            if (initialized) break;
+            await sleep(50);
+            attempts++;
+        }
+        if (!initialized) {
+            throw new Error('ONNX Runtime failed to initialize');
         }
     }
 
     /**
      * Create a new tensor.
-     * @param {string} dtype The data type of the tensor.
-     * @param {Array<number>} data The data of the tensor.
-     * @param {Array<number>} dims The dimensions of the tensor.
-     * @returns {Promise<Tensor>} A promise that resolves to a new tensor.
      */
     static async createTensor(dtype, data, dims) {
         await ONNX.waitForInitialization();
@@ -50,16 +59,56 @@ export class ONNX {
     }
 
     /**
-     * Create a new inference session.
-     * @param {ArrayBuffer} model The model to load.
-     * @param {Object} [options] The options for the inference session.
-     * @returns {Promise<InferenceSession>} A promise that resolves to a new inference session.
+     * Create or get a cached inference session.
      */
-    static async createInferenceSession(model, options = {}) {
+    static async createInferenceSession(modelPath, options = {}) {
         await ONNX.waitForInitialization();
-        return await InferenceSession.create(model, options);
+        
+        // Return cached session if exists
+        if (sessionCache.has(modelPath)) {
+            return sessionCache.get(modelPath);
+        }
+
+        const release = await sessionMutex.acquire();
+        try {
+            if (sessionCache.has(modelPath)) return sessionCache.get(modelPath);
+
+            console.log(`[ONNX] Loading session: ${modelPath}`);
+            const session = await InferenceSession.create(modelPath, {
+                ...options,
+                executionProviders: ['wasm'], // Stick to WASM
+                graphOptimizationLevel: 'all'
+            });
+            
+            sessionCache.set(modelPath, session);
+            sessionLocks.set(modelPath, new MutexLock());
+            return session;
+        } catch (err) {
+            console.error(`[ONNX] Error loading ${modelPath}:`, err);
+            throw err;
+        } finally {
+            release();
+        }
+    }
+
+    /**
+     * Run a session with a per-session lock to prevent concurrency errors.
+     */
+    static async runSession(modelPath, inputs) {
+        const session = sessionCache.get(modelPath);
+        if (!session) throw new Error(`Session not found for ${modelPath}`);
+        
+        const lock = sessionLocks.get(modelPath);
+        const release = await lock.acquire();
+        try {
+            return await session.run(inputs);
+        } finally {
+            release();
+        }
     }
 }
 
 // Initialize immediately if possible
-ONNX.initialize();
+if (typeof window !== "undefined") {
+    ONNX.initialize();
+}

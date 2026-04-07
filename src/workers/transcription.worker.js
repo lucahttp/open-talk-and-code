@@ -12,12 +12,21 @@ class TranscriptionPipeline {
 
     static async getInstance(progressCallback = null) {
         if (this.instance === null) {
+            let device = "webgpu";
+            try {
+                if (!navigator.gpu) throw new Error("WebGPU not supported");
+                await navigator.gpu.requestAdapter();
+            } catch (e) {
+                console.warn("[TranscriptionWorker] WebGPU failed, falling back to wasm:", e.message);
+                device = "wasm";
+            }
+
             this.instance = pipeline(this.task, this.model, {
                 dtype: {
                     encoder_model: "fp32",
                     decoder_model_merged: "q4",
                 },
-                device: "webgpu",
+                device: device,
                 progress_callback: progressCallback,
             });
         }

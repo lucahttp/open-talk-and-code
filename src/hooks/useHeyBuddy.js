@@ -66,6 +66,7 @@ function samplesToBlob(audioSamples, sampleRate = 16000, numChannels = 1) {
 export function useHeyBuddy(options = {}, onRecordingComplete = null) {
     const [state, setState] = useState(initialState);
     const heyBuddyRef = useRef(null);
+    const initializedRef = useRef(false);
     const onRecordingCompleteRef = useRef(onRecordingComplete);
 
     // Keep callback ref updated
@@ -119,7 +120,24 @@ export function useHeyBuddy(options = {}, onRecordingComplete = null) {
         }
     }, []);
 
+    const startRecording = useCallback(() => {
+        if (heyBuddyRef.current) {
+            heyBuddyRef.current.startRecording();
+            updateState({ isRecording: true });
+        }
+    }, [updateState]);
+
+    const stopRecording = useCallback(() => {
+        if (heyBuddyRef.current) {
+            heyBuddyRef.current.stopRecording();
+            updateState({ isRecording: false });
+        }
+    }, [updateState]);
+
     useEffect(() => {
+        if (initializedRef.current) return;
+        initializedRef.current = true;
+
         // Initialize HeyBuddy instance
         const heyBuddy = new HeyBuddy(options);
         heyBuddyRef.current = heyBuddy;
@@ -155,7 +173,11 @@ export function useHeyBuddy(options = {}, onRecordingComplete = null) {
 
         // Cleanup
         return () => {
-            heyBuddy.stop();
+            if (heyBuddyRef.current) {
+                heyBuddyRef.current.stop();
+                heyBuddyRef.current = null;
+                initializedRef.current = false;
+            }
         };
     }, [options, updateState]);
 
@@ -165,6 +187,8 @@ export function useHeyBuddy(options = {}, onRecordingComplete = null) {
         stop,
         pause,
         resume,
+        startRecording,
+        stopRecording,
         requestMicrophonePermission,
     };
 }

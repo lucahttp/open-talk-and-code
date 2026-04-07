@@ -130,10 +130,18 @@ const LoadingScreen = ({ progress, status, onComplete }) => {
           </div>
         </div>
         
-        <div className="mt-4 text-gray-500 text-xs font-mono">
+        <div className={`mt-4 text-xs font-mono ${status.includes('Error') ? 'text-red-500 font-bold animate-pulse' : 'text-gray-500'}`}>
           {status}
         </div>
       </div>
+      {status.includes('Error') && (
+        <button 
+          onClick={() => window.location.reload()} 
+          className="mt-4 border border-red-500 text-red-500 px-4 py-2 hover:bg-red-500 hover:text-black transition-colors"
+        >
+          RETRY BOOT
+        </button>
+      )}
     </div>
   );
 };
@@ -533,7 +541,7 @@ const SpeechVisualizer = ({ probability }) => {
 };
 
 // Hook to preload all models with progress tracking
-const useModelLoader = () => {
+const useModelLoader = (options) => {
   const [isLoading, setIsLoading] = useState(true);
   const [progress, setProgress] = useState({
     'Hey Buddy Wake Words': 0,
@@ -544,48 +552,22 @@ const useModelLoader = () => {
   });
   const [status, setStatus] = useState('Checking cached models...');
   const [modelsReady, setModelsReady] = useState(false);
+  const loadingRef = useRef(false);
 
   useEffect(() => {
-    const loadModels = async () => {
-      const errors = [];
-      
-      try {
-        // Step 1: Hey Buddy
-        console.log('[ModelLoader] Step 1/5: Loading Hey Buddy...');
-        setStatus('Loading Hey Buddy models...');
-        
-        const heyBuddy = new HeyBuddy({
-          ...heyBuddyOptions,
-          debug: false
-        });
-        
-        setProgress(prev => ({
-          ...prev,
-          'Hey Buddy Wake Words': 25,
-          'Silero VAD': 25,
-          'Speech Embedding': 25
-        }));
-        
-        await new Promise(resolve => setTimeout(resolve, 500));
-        console.log('[ModelLoader] ✓ Hey Buddy initialized');
-        
-        // Step 2: Whisper (skip preload - will load on demand or use Web Speech API fallback)
-        console.log('[ModelLoader] Step 2/5: Skipping Whisper preload (will load on demand or use Web Speech API fallback)');
-        setStatus('Whisper will load on demand (Web Speech API fallback ready)...');
-        setProgress(prev => ({ ...prev, 'Whisper Transcription': 100 }));
-        
-        // Check Web Speech API support
-        const webSpeechSupported = 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
-        console.log('[ModelLoader] Web Speech API supported:', webSpeechSupported);
+    if (loadingRef.current) return;
+    loadingRef.current = true;
 
-        // Step 3: FunctionGemma Intent (Optional - uses regex fallback if fails)
-        console.log('[ModelLoader] Step 3/5: Skipping FunctionGemma preload (will lazy-load if needed)');
-        setStatus('FunctionGemma will load on-demand...');
-        console.log('[ModelLoader] ℹ️ Intent classification uses regex fallback by default');
+    const loadModels = async () => {
+      try {
+        console.log('[ModelLoader] Step 1/2: Loading Hey Buddy...');
+        setStatus('Initializing Hey Buddy (WASM)...');
         
-        setProgress(prev => ({ ...prev, 'FunctionGemma Intent': 100 }));
+        const heyBuddy = new HeyBuddy(options);
         
-        // Mark Hey Buddy as complete
+        // Use real wait instead of fake timeout
+        await heyBuddy.waitUntilReady();
+        
         setProgress(prev => ({
           ...prev,
           'Hey Buddy Wake Words': 100,
@@ -593,27 +575,22 @@ const useModelLoader = () => {
           'Speech Embedding': 100
         }));
         
-        if (errors.length > 0) {
-          console.warn('[ModelLoader] Completed with errors:', errors);
-          setStatus(`Loaded with ${errors.length} warning(s). Check console.`);
-        } else {
-          setStatus('All models ready!');
-        }
+        console.log('[ModelLoader] Step 2/2: Checking STT Fallback...');
+        setStatus('Whisper loads on-demand. Web Speech API ready.');
+        setProgress(prev => ({ ...prev, 'Whisper Transcription': 100, 'FunctionGemma Intent': 100 }));
         
+        setStatus('All systems GO!');
         setModelsReady(true);
-        
-        await new Promise(resolve => setTimeout(resolve, 500));
         setIsLoading(false);
-        
       } catch (err) {
         console.error('[ModelLoader] Fatal error:', err);
-        setStatus(`Error: ${err.message}. Retrying in 3s...`);
-        setTimeout(() => loadModels(), 3000);
+        setStatus(`Error: ${err.message}. Check console.`);
+        setIsLoading(false); // Stop loading to show error
       }
     };
 
     loadModels();
-  }, []);
+  }, []); // Run once on mount
 
   return { isLoading, progress, status, modelsReady };
 };
@@ -649,7 +626,9 @@ const saveSettings = (settings) => {
 function App() {
   const [settings, setSettings] = useState(loadSettings)
   const [showPermissionPrompt, setShowPermissionPrompt] = useState(false)
+  const [showCreateSessionPopup, setShowCreateSessionPopup] = useState(false)
   const lastMessageRef = useRef(null)
+  const pendingMessageRef = useRef(null)
   const [showTranscriptionError, setShowTranscriptionError] = useState(null)
 
   // Persist settings to localStorage
@@ -658,7 +637,7 @@ function App() {
   }, [settings])
 
   // Load models on startup
-  const { isLoading: isModelsLoading, progress, status, modelsReady } = useModelLoader();
+  const { isLoading: isModelsLoading, progress, status, modelsReady } = useModelLoader(heyBuddyOptions);
 
   // OpenCode connection
   const {
@@ -759,6 +738,8 @@ function App() {
     stop,
     pause,
     resume,
+    startRecording: startHeyBuddyRecording,
+    stopRecording: stopHeyBuddyRecording,
     requestMicrophonePermission,
   } = useHeyBuddy(heyBuddyOptions, handleRecordingComplete);
 
@@ -847,6 +828,9 @@ function App() {
     resetState: resetGraceProcessor,
   } = useGracePeriodProcessor({
     onComplete: async (audioBuffer) => {
+      // Stop HeyBuddy recording
+      stopHeyBuddyRecording();
+      
       // Reset flag
       graceRecorderActiveRef.current = false;
       console.log('[App] Grace period completed, deactivating flag');
@@ -878,6 +862,13 @@ function App() {
       interruptGracePeriod();
     },
   });
+
+  // Sync HeyBuddy recording with state machine
+  useEffect(() => {
+    if (conversationState === STATES.IDLE) {
+      stopHeyBuddyRecording();
+    }
+  }, [conversationState, STATES.IDLE, stopHeyBuddyRecording]);
 
   // Update ref for processGracePeriodAudio
   useEffect(() => {
@@ -1020,11 +1011,57 @@ function App() {
     if (transcript?.text && !transcript.isBusy && conversationState === STATES.TRANSCRIBING) {
       const text = transcript.text;
       
+      // Filter out common Whisper hallucinations/noise
+      const noisePatterns = [
+        /\(speaking in foreign language\)/i,
+        /\(upbeat music\)/i,
+        /\[music\]/i,
+        /\[silence\]/i,
+        /thank you for watching/i,
+        /subscribe to my channel/i
+      ];
+      
+      const isNoise = noisePatterns.some(pattern => pattern.test(text));
+      
+      if (isNoise) {
+        console.log('[App] Ignoring Whisper noise/hallucination:', text);
+        resetToIdle();
+        graceRecorderActiveRef.current = false;
+        resetGraceProcessor();
+        clearTranscript();
+        return;
+      }
+
       // Remove wake words
       let cleanedText = text;
       for (const wakeWord of WAKE_WORDS) {
         const regex = new RegExp(`^\\s*${wakeWord}[,\\s]*`, 'i');
         cleanedText = cleanedText.replace(regex, '').trim();
+      }
+      
+      // Check if we have connection and session
+      if (!connected) {
+        console.log('[App] Not connected to OpenCode, cannot send');
+        chiptune.playError?.();
+        resetToIdle();
+        graceRecorderActiveRef.current = false;
+        resetGraceProcessor();
+        clearTranscript();
+        return;
+      }
+      
+      if (!selectedSession) {
+        console.log('[App] No session selected, showing create session popup');
+        // Save the pending message
+        pendingMessageRef.current = cleanedText;
+        // Show popup for creating session
+        setShowCreateSessionPopup(true);
+        // Reset state but keep transcript for later
+        resetToIdle();
+        graceRecorderActiveRef.current = false;
+        resetGraceProcessor();
+        clearTranscript();
+        return;
       }
       
       if (cleanedText) {
@@ -1057,7 +1094,7 @@ function App() {
       
       clearTranscript();
     }
-  }, [transcript, conversationState, sendMessage, clearTranscript, startSending, resetToIdle, settings.chiptune, resetGraceProcessor]);
+  }, [transcript, conversationState, connected, selectedSession, sendMessage, clearTranscript, startSending, resetToIdle, settings.chiptune, resetGraceProcessor]);
 
   // Watch for OpenCode responses and speak them
   useEffect(() => {
@@ -1092,57 +1129,6 @@ function App() {
     return [...messages, ...wsChatMessages];
   }, [messages, wsMessages]);
 
-  // Track processed transcripts to avoid duplicates
-  const processedTranscriptsRef = useRef(new Set());
-
-  // Transcription -> OpenCode
-  useEffect(() => {
-    if (transcript?.text && !transcript.isBusy && connected && selectedSession) {
-      const text = transcript.text;
-      
-      // Skip if we already processed this exact text
-      if (processedTranscriptsRef.current.has(text)) {
-        clearTranscript();
-        return;
-      }
-      
-      // Mark as processed
-      processedTranscriptsRef.current.add(text);
-
-      // Remove wake words from the beginning of the transcript
-      let cleanedText = text;
-      for (const wakeWord of WAKE_WORDS) {
-        const regex = new RegExp(`^\\s*${wakeWord}[,\\s]*`, 'i');
-        cleanedText = cleanedText.replace(regex, '').trim();
-      }
-
-      // Only send if there's actual content after removing wake word
-      if (cleanedText) {
-        console.log('Transcription complete, sending to OpenCode:', cleanedText);
-        
-        // Play chiptune processing sound
-        if (settings.chiptune) {
-          chiptune.playProcessing();
-        }
-        
-        // Send to OpenCode
-        sendMessage(cleanedText).then(() => {
-          if (settings.chiptune) {
-            chiptune.playSuccess();
-          }
-        }).catch((err) => {
-          console.error('Failed to send:', err);
-          if (settings.chiptune) {
-            chiptune.playError();
-          }
-        });
-      }
-      
-      // Clear transcript after processing
-      clearTranscript();
-    }
-  }, [transcript, connected, selectedSession, sendMessage, clearTranscript, settings.chiptune]);
-
   // Pause listening during processing/speaking
   useEffect(() => {
     if (isTranscribing || isSpeaking || !connected) {
@@ -1151,20 +1137,6 @@ function App() {
       resume();
     }
   }, [isTranscribing, isSpeaking, connected, pause, resume]);
-
-  // Watch for new LLM responses and speak them
-  useEffect(() => {
-    const lastMessage = messages[messages.length - 1]
-    
-    if (lastMessage && lastMessage.role === 'assistant' && lastMessage.id !== lastMessageRef.current) {
-      lastMessageRef.current = lastMessage.id
-      
-      // Speak the response
-      if (settings.tts && lastMessage.content) {
-        browserSpeak(lastMessage.content);
-      }
-    }
-  }, [messages, settings.tts, browserSpeak]);
 
   // Show permission prompt when models are ready
   useEffect(() => {
@@ -1221,6 +1193,42 @@ function App() {
     }
   }, [createSession, sessions.length])
 
+  // Handle creating session from popup and sending pending message
+  const handleCreateSessionAndSend = useCallback(async () => {
+    try {
+      console.log('[App] Creating session from popup...');
+      const newSession = await createSession(`Voice Session ${sessions.length + 1}`);
+      
+      if (newSession && pendingMessageRef.current) {
+        console.log('[App] Session created, sending pending message:', pendingMessageRef.current);
+        // Pass the new session ID explicitly to avoid state update race condition
+        await sendMessage(pendingMessageRef.current, { sessionId: newSession.id });
+        pendingMessageRef.current = null;
+        setShowCreateSessionPopup(false);
+        
+        if (settings.chiptune) {
+          chiptune.playSuccess();
+        }
+      }
+    } catch (err) {
+      console.error('[App] Failed to create session or send message:', err);
+      if (settings.chiptune) {
+        chiptune.playError();
+      }
+    }
+  }, [createSession, sessions.length, sendMessage, settings.chiptune])
+
+  // Handle canceling session creation
+  const handleCancelCreateSession = useCallback(() => {
+    console.log('[App] User canceled session creation, discarding message');
+    pendingMessageRef.current = null;
+    setShowCreateSessionPopup(false);
+    // Reset grace processor flag
+    graceRecorderActiveRef.current = false;
+    resetGraceProcessor();
+    resetToIdle();
+  }, [resetGraceProcessor, resetToIdle])
+
   const handleToggle = useCallback((key, value) => {
     if (key === 'voice') {
       setSettings(s => ({ ...s, voice: value }));
@@ -1236,7 +1244,7 @@ function App() {
   const isLoading = isTranscriberLoading || connecting;
 
   // Show loading screen while models are loading
-  if (isModelsLoading) {
+  if (isModelsLoading || !modelsReady) {
     return <LoadingScreen progress={progress} status={status} />;
   }
 
@@ -1411,6 +1419,39 @@ function App() {
               </button>
               <button
                 onClick={() => setShowPermissionPrompt(false)}
+                className="flex-1 border border-gray-600 text-gray-400 py-2 hover:border-red-500 hover:text-red-500"
+              >
+                CANCEL
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Create Session Popup */}
+      {showCreateSessionPopup && (
+        <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50">
+          <div className="border-2 border-terminal p-6 max-w-md bg-black">
+            <h2 className="text-terminal text-lg font-bold mb-4">No Session Selected</h2>
+            <p className="text-gray-400 text-sm mb-4">
+              You need to create a session to send messages to OpenCode.
+            </p>
+            {pendingMessageRef.current && (
+              <div className="mb-4 p-2 border border-terminal/30 bg-terminal/5">
+                <p className="text-terminal text-xs mb-1">Pending message:</p>
+                <p className="text-gray-300 text-sm italic">
+                  &quot;{pendingMessageRef.current.substring(0, 60)}{pendingMessageRef.current.length > 60 ? '...' : ''}&quot;
+                </p>
+              </div>
+            )}
+            <div className="flex gap-4">
+              <button
+                onClick={handleCreateSessionAndSend}
+                className="flex-1 border border-terminal text-terminal py-2 hover:bg-terminal hover:text-black"
+              >
+                CREATE SESSION & SEND
+              </button>
+              <button
+                onClick={handleCancelCreateSession}
                 className="flex-1 border border-gray-600 text-gray-400 py-2 hover:border-red-500 hover:text-red-500"
               >
                 CANCEL

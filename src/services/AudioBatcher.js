@@ -1,13 +1,66 @@
 /** @module audio */
 
 // Minified worklet code
-const workletName = "hey-buddy";
-const workletBlob = new Blob(
-    [
-        `(()=>{class t extends AudioWorkletProcessor{constructor(t){super(t),this.targetSampleRate=t.processorOptions.targetSampleRate,this.inputBuffer=new Float32Array(this.inputFrameSize),this.inputBufferSize=0,this.outputBuffer=new Float32Array(this.targetFrameSize)}get inputFrameSize(){return Math.round(sampleRate/50)}get targetFrameSize(){return Math.round(this.targetSampleRate/50)}async flush(){const t=sampleRate/this.targetSampleRate;this.outputBuffer.fill(0);for(let e=0;e<this.targetFrameSize;e++){const i=e*t,r=Math.floor(i),s=Math.min(r+1,this.targetFrameSize-1),u=i-r;this.outputBuffer[e]=this.inputBuffer[r]*(1-u)+this.inputBuffer[s]*u}await this.port.postMessage(this.outputBuffer)}pushAudio(t){const e=t.length,i=this.inputFrameSize-this.inputBufferSize;if(e<i)return this.inputBuffer.set(t,this.inputBufferSize),void(this.inputBufferSize+=e);this.inputBuffer.set(t.subarray(0,i),this.inputBufferSize),this.flush(),this.inputBufferSize=0,this.pushAudio(t.subarray(i))}process(t,e,i){return this.pushAudio(t[0][0]),!0}}registerProcessor("${workletName}",t)})();`,
-    ],
-    { type: "application/javascript" }
-);
+// Audio Worklet code for resampling and batching
+const workletCode = `
+class HeyBuddyProcessor extends AudioWorkletProcessor {
+    constructor(options) {
+        super();
+        this.targetSampleRate = options.processorOptions.targetSampleRate;
+        this.inputFrameSize = Math.round(sampleRate / 50); // 20ms at source sample rate
+        this.targetFrameSize = Math.round(this.targetSampleRate / 50); // 20ms at target sample rate
+        this.inputBuffer = new Float32Array(this.inputFrameSize);
+        this.inputBufferSize = 0;
+        this.outputBuffer = new Float32Array(this.targetFrameSize);
+    }
+
+    async flush() {
+        const ratio = sampleRate / this.targetSampleRate;
+        this.outputBuffer.fill(0);
+        
+        // Simple linear interpolation for resampling
+        for (let i = 0; i < this.targetFrameSize; i++) {
+            const pos = i * ratio;
+            const left = Math.floor(pos);
+            const right = Math.min(left + 1, this.inputFrameSize - 1);
+            const weight = pos - left;
+            this.outputBuffer[i] = this.inputBuffer[left] * (1 - weight) + this.inputBuffer[right] * weight;
+        }
+        
+        this.port.postMessage(this.outputBuffer);
+    }
+
+    pushAudio(data) {
+        let offset = 0;
+        while (offset < data.length) {
+            const remaining = data.length - offset;
+            const space = this.inputFrameSize - this.inputBufferSize;
+            const toCopy = Math.min(remaining, space);
+            
+            this.inputBuffer.set(data.subarray(offset, offset + toCopy), this.inputBufferSize);
+            this.inputBufferSize += toCopy;
+            offset += toCopy;
+            
+            if (this.inputBufferSize >= this.inputFrameSize) {
+                this.flush();
+                this.inputBufferSize = 0;
+            }
+        }
+    }
+
+    process(inputs, outputs, parameters) {
+        const input = inputs[0];
+        if (input && input.length > 0 && input[0].length > 0) {
+            this.pushAudio(input[0]);
+        }
+        return true;
+    }
+}
+
+registerProcessor("hey-buddy", HeyBuddyProcessor);
+`;
+
+const workletBlob = new Blob([workletCode], { type: "application/javascript" });
 const workletUrl = URL.createObjectURL(workletBlob);
 
 /**
@@ -119,7 +172,7 @@ export class AudioNode {
                 targetSampleRate: targetSampleRate,
             },
         };
-        const worker = new AudioWorkletNode(context, workletName, workletOptions);
+        const worker = new AudioWorkletNode(context, "hey-buddy", workletOptions);
         return new AudioNode(context, worker);
     }
 }

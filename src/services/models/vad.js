@@ -27,17 +27,6 @@ export class SileroVAD extends ONNXModel {
         this.isSpeaking = false;
     }
 
-    async test(debug = false) {
-        const result = await this.run(new Float32Array(16000).fill(0));
-        if (!isNaN(result) && 0.0 <= result && result <= 1.0) {
-            if (debug) {
-                console.log(`VAD model OK, executed in ${this.duration} ms`);
-            }
-        } else {
-            throw new Error(`VAD model failed - got ${result}`);
-        }
-    }
-
     async execute(input) {
         if (
             this.h === undefined ||
@@ -60,12 +49,15 @@ export class SileroVAD extends ONNXModel {
             1,
             input.length,
         ]);
-        const output = await this.session.run({
+        
+        // Use the global runSession to ensure locking
+        const output = await ONNX.runSession(this.modelPath, {
             input: inputTensor,
             h: this.h,
             c: this.c,
             sr: this.sr,
         });
+        
         this.c = output.cn;
         this.h = output.hn;
         return output.output.data[0];

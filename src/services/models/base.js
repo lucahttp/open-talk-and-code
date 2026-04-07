@@ -6,88 +6,38 @@ import { ONNX } from "../onnx";
  * Base class for ONNX models
  */
 export class ONNXModel {
-    /**
-     * Constructor
-     * @param {string} modelPath - Path to the ONNX model
-     * @param {number} power - Power preference (0=default, -1=low, 1=high)
-     * @param {number} webnn - WebNN priority
-     * @param {number} webgpu - WebGPU priority
-     * @param {number} webgl - WebGL priority
-     * @param {number} wasm - WASM priority
-     */
     constructor(
         modelPath,
         power = 0,
-        webnn = 1,
-        webgpu = 2,
-        webgl = 3,
-        wasm = 4
+        webnn = 4,
+        webgpu = 3,
+        webgl = 2,
+        wasm = 1
     ) {
         this.modelPath = modelPath;
         this.session = null;
+        this.error = null;
         this.duration = 0.0;
         this.ema = 0.1;
         this.lastTime = 0.0;
-        this.webnn = webnn;
-        this.webgpu = webgpu;
-        this.webgl = webgl;
-        this.wasm = wasm;
-        this.power = power;
         this.load();
     }
 
-    get powerPreference() {
-        switch (this.power) {
-            case -1:
-                return "low-power";
-            case 1:
-                return "high-performance";
-            default:
-                return "default";
-        }
-    }
-
-    get executionProviders() {
-        const providerIndexes = [];
-        if (Number.isInteger(this.webnn)) {
-            providerIndexes.push([
-                {
-                    name: "webnn",
-                    device: "gpu",
-                    powerPreference: this.powerPreference,
-                },
-                this.webnn,
-            ]);
-        }
-        if (Number.isInteger(this.webgpu)) {
-            providerIndexes.push(["webgpu", this.webgpu]);
-        }
-        if (Number.isInteger(this.webgl)) {
-            providerIndexes.push(["webgl", this.webgl]);
-        }
-        if (Number.isInteger(this.wasm)) {
-            providerIndexes.push(["wasm", this.wasm]);
-        }
-        providerIndexes.sort((a, b) => a[1] - b[1]);
-        return providerIndexes.map((providerIndex) => providerIndex[0]);
-    }
-
-    get sessionOptions() {
-        return {
-            executionProviders: ["wasm"],
-        };
-    }
-
     async load() {
-        this.session = await ONNX.createInferenceSession(
-            this.modelPath,
-            this.sessionOptions
-        );
+        try {
+            // This will now return a cached session if available
+            this.session = await ONNX.createInferenceSession(this.modelPath);
+        } catch (err) {
+            this.error = err;
+        }
     }
 
     async waitUntilLoaded() {
-        while (this.session === null) {
-            await sleep(1);
+        while (this.session === null && this.error === null) {
+            await sleep(50);
+        }
+        if (this.error) {
+            throw new Error(`Failed to load model ${this.modelPath}: ${this.error.message}`);
         }
     }
 
@@ -98,15 +48,21 @@ export class ONNXModel {
     async run(input) {
         await this.waitUntilLoaded();
         const currentTime = new Date().getTime();
-        const result = await this.execute(input);
-        const executionDuration = new Date().getTime() - currentTime;
-        if (this.duration === 0.0) {
-            this.duration = executionDuration;
-        } else {
-            this.duration =
-                (1.0 - this.ema) * this.duration + this.ema * executionDuration;
+        try {
+            // Using the global runSession to ensure per-model locking
+            const result = await this.execute(input);
+            const executionDuration = new Date().getTime() - currentTime;
+            
+            if (this.duration === 0.0) {
+                this.duration = executionDuration;
+            } else {
+                this.duration = (1.0 - this.ema) * this.duration + this.ema * executionDuration;
+            }
+            this.lastTime = currentTime;
+            return result;
+        } catch (err) {
+            console.error(`[ONNXModel] Error in ${this.modelPath}:`, err);
+            throw err;
         }
-        this.lastTime = currentTime;
-        return result;
     }
 }
