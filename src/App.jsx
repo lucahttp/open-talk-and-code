@@ -1,6 +1,7 @@
 import React, { useEffect, useCallback } from 'react';
 import gsap from 'gsap';
 import './index.css';
+import chiptune from './services/chiptune';
 
 import { VoiceAgentProvider, useVoiceAgent } from './contexts/VoiceAgentContext';
 import { ASCIIHeader } from './components/ASCIIHeader';
@@ -65,6 +66,25 @@ function VoiceAgentApp() {
       );
     }
   }, [activeWakeWords, settings.chiptune]);
+
+  // AudioContext must be initialized by user gesture
+  useEffect(() => {
+    const initAudio = () => {
+      if (!chiptune.isInitialized || !chiptune.ctx || chiptune.ctx.state === 'suspended') {
+        chiptune.init();
+      }
+      if (chiptune.isInitialized) {
+        window.removeEventListener('click', initAudio);
+        window.removeEventListener('keydown', initAudio);
+      }
+    };
+    window.addEventListener('click', initAudio);
+    window.addEventListener('keydown', initAudio);
+    return () => {
+      window.removeEventListener('click', initAudio);
+      window.removeEventListener('keydown', initAudio);
+    };
+  }, []);
 
   const handleCreateSession = useCallback(async () => {
     try {

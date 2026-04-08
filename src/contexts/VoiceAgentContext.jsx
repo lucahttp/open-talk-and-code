@@ -318,14 +318,37 @@ export const VoiceAgentProvider = ({ children, heyBuddyOptions }) => {
   useEffect(() => {
     const lastMsg = openCodeApi.messages[openCodeApi.messages.length - 1];
     if (lastMsg && lastMsg.role === 'assistant' && lastMsg.id !== lastMessageRef.current) {
-      lastMessageRef.current = lastMsg.id;
-      if (settings.tts && lastMsg.content) {
-        const paragraphs = lastMsg.content.split(/\n\n+|(?<=[.!?])\s+(?=[A-Z])/).map(p => p.trim()).filter(p => p.length > 0);
-        conversationMachine.startSpeaking(paragraphs.length);
-        bargeInApi.speakParagraphs(lastMsg.content);
+      if (!lastMsg.streaming || lastMsg.status === 'completed' || lastMsg.finish === 'stop') {
+        lastMessageRef.current = lastMsg.id;
+        if (settings.tts && lastMsg.content) {
+          const paragraphs = lastMsg.content.split(/\n\n+|(?<=[.!?])\s+(?=[A-Z])/).map(p => p.trim()).filter(p => p.length > 0);
+          conversationMachine.startSpeaking(paragraphs.length);
+          bargeInApi.speakParagraphs(lastMsg.content);
+        }
       }
     }
   }, [openCodeApi.messages, settings.tts, conversationMachine, bargeInApi]);
+
+  const lastActivityRef = useRef(null);
+  
+  // Real-time narrator for what OpenCode is doing (tools, thoughts, etc)
+  useEffect(() => {
+    if (settings.tts && openCodeApi.activity && openCodeApi.activity !== lastActivityRef.current) {
+      const act = openCodeApi.activity;
+      lastActivityRef.current = act;
+      
+      let activityText = typeof act === 'string' ? act : (act.description || act.text || null);
+      if (activityText) {
+        // Strip out markdown or brackets so it sounds nice from voice
+        activityText = activityText.replace(/[`*[\]]/g, '').trim();
+        if (activityText.length > 0) {
+           ttsApi.speak(`Processing: ${activityText}`);
+        }
+      }
+    } else if (!openCodeApi.activity) {
+      lastActivityRef.current = null;
+    }
+  }, [openCodeApi.activity, settings.tts, ttsApi]);
 
   const combinedMessages = useMemo(() => {
     return [...openCodeApi.messages];
@@ -366,10 +389,13 @@ export const VoiceAgentProvider = ({ children, heyBuddyOptions }) => {
     try {
       const newSession = await openCodeApi.createSession(`Voice Session ${openCodeApi.sessions.length + 1}`);
       if (newSession && pendingMessageRef.current) {
-        await openCodeApi.sendMessage(pendingMessageRef.current, { sessionId: newSession.id });
+        const messageToSend = pendingMessageRef.current;
         pendingMessageRef.current = null;
         setShowCreateSessionPopup(false);
-        if (settings.chiptune) chiptune.playSuccess();
+        if (settings.chiptune) {
+          chiptune.playSuccess();
+        }
+        await openCodeApi.sendMessage(messageToSend, { sessionId: newSession.id });
       }
     } catch (err) {
       if (settings.chiptune) chiptune.playError();

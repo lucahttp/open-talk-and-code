@@ -1,0 +1,206 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --primary: #d97706;
+  --primary-dark: #b45309;
+  --cream: #fef3c7;
+  --warm-white: #fffbf0;
+  --brown: #78350f;
+  --text: #451a03;
+  --text-light: #78350f;
+}
+
+body {
+  font-family: 'Georgia', serif;
+  background: var(--warm-white);
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.app {
+  min-height: 100vh;
+}
+
+.navbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 2rem;
+  background: var(--cream);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.logo {
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: var(--brown);
+}
+
+.nav-links {
+  display: flex;
+  gap: 2rem;
+}
+
+.nav-links a {
+  text-decoration: none;
+  color: var(--text-light);
+  font-weight: 500;
+  transition: color 0.3s;
+}
+
+.nav-links a:hover {
+  color: var(--primary);
+}
+
+.hero {
+  background: linear-gradient(rgba(120, 53, 15, 0.7), rgba(120, 53, 15, 0.7)),
+    url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect fill="%23fef3c7" width="100" height="100"/><circle cx="30" cy="30" r="20" fill="%23fcd34d" opacity="0.3"/><circle cx="70" cy="60" r="25" fill="%23fbbf24" opacity="0.3"/><circle cx="50" cy="80" r="15" fill="%23f59e0b" opacity="0.2"/></svg>');
+  background-size: cover;
+  padding: 6rem 2rem;
+  text-align: center;
+}
+
+.hero-content h1 {
+  font-size: 3.5rem;
+  color: var(--cream);
+  margin-bottom: 1rem;
+}
+
+.hero-content p {
+  font-size: 1.3rem;
+  color: var(--cream);
+  margin-bottom: 2rem;
+}
+
+.cta-button {
+  display: inline-block;
+  background: var(--primary);
+  color: white;
+  padding: 1rem 2rem;
+  text-decoration: none;
+  border-radius: 30px;
+  font-size: 1.1rem;
+  font-weight: bold;
+  transition: background 0.3s, transform 0.3s;
+}
+
+.cta-button:hover {
+  background: var(--primary-dark);
+  transform: scale(1.05);
+}
+
+.menu-section,
+.about-section,
+.contact-section {
+  padding: 4rem 2rem;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.menu-section h2,
+.about-section h2,
+.contact-section h2 {
+  text-align: center;
+  font-size: 2.5rem;
+  color: var(--brown);
+  margin-bottom: 2rem;
+}
+
+.menu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.5rem;
+}
+
+.menu-item {
+  background: white;
+  padding: 1.5rem;
+  border-radius: 10px;
+  box-shadow: 0 4px 15px rgba(120, 53, 15, 0.1);
+  transition: transform 0.3s;
+}
+
+.menu-item:hover {
+  transform: translateY(-5px);
+}
+
+.menu-item h3 {
+  color: var(--brown);
+  font-size: 1.3rem;
+  margin-bottom: 0.5rem;
+}
+
+.menu-item p {
+  color: var(--text-light);
+  margin-bottom: 1rem;
+}
+
+.price {
+  display: inline-block;
+  background: var(--primary);
+  color: white;
+  padding: 0.3rem 1rem;
+  border-radius: 15px;
+  font-weight: bold;
+}
+
+.about-section {
+  background: var(--cream);
+}
+
+.about-section p {
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+  text-align: center;
+}
+
+.contact-section {
+  text-align: center;
+  background: var(--brown);
+  color: var(--cream);
+  max-width: 100%;
+}
+
+.contact-section h2 {
+  color: var(--cream);
+}
+
+.contact-section p {
+  font-size: 1.1rem;
+  margin-bottom: 0.5rem;
+}
+
+.contact-section .hours {
+  margin-top: 1rem;
+  opacity: 0.9;
+}
+
+.footer {
+  background: var(--text);
+  color: var(--cream);
+  text-align: center;
+  padding: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .navbar {
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .hero-content h1 {
+    font-size: 2.5rem;
+  }
+
+  .menu-section,
+  .about-section,
+  .contact-section {
+    padding: 2rem 1rem;
+  }
+}

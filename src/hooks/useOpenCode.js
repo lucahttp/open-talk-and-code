@@ -52,7 +52,7 @@ export function useOpenCode() {
 
         // Parse event according to OpenAPI schema: { type: "...", properties: { sessionID, info/part } }
         const props = event.properties || {}
-        const sessionID = props.sessionID
+        const sessionID = props.sessionID || props.info?.sessionID || props.part?.sessionID || props.session?.id
         const isCurrentSession = sessionID === currentSession?.id
 
         // Only log for message-related events to reduce noise
@@ -358,12 +358,19 @@ export function useOpenCode() {
   const createSession = useCallback(async (title) => {
     try {
       const session = await api.createSession({ title })
+      selectedSessionRef.current = session // update immediately for SSE checks
       setSessions(prev => [...prev, session])
       setSelectedSession(session)
       
-      // Load messages for new session
+      // Load messages for new session, if any
       const msgs = await api.listMessages(session.id)
-      setMessages(msgs)
+      setMessages(prev => {
+        // Only update if we are still on this session and messages haven't been optimistically added
+        if (selectedSessionRef.current?.id === session.id && prev.length === 0) {
+          return msgs
+        }
+        return prev
+      })
       
       return session
     } catch (err) {
@@ -376,6 +383,7 @@ export function useOpenCode() {
   const selectSession = useCallback(async (sessionId) => {
     const session = sessions.find(s => s.id === sessionId)
     if (session) {
+      selectedSessionRef.current = session // update immediately
       setSelectedSession(session)
       setActivity(null)
       setIsProcessing(false)
@@ -385,7 +393,12 @@ export function useOpenCode() {
       // Load messages
       try {
         const msgs = await api.listMessages(sessionId)
-        setMessages(msgs)
+        setMessages(prev => {
+           if (selectedSessionRef.current?.id === sessionId) {
+              return msgs
+           }
+           return prev
+        })
       } catch (err) {
         console.error('Failed to load messages:', err)
       }
@@ -431,6 +444,41 @@ export function useOpenCode() {
       })
 
       console.log('[OpenCode] Message sent successfully, response:', response)
+
+      // Fallback: If OpenCode returns the full response directly, we should add it
+      // in case the SSE events were missed or delayed.
+      if (response && response.info && response.parts) {
+         setMessages(prev => {
+             const textParts = response.parts.filter(p => p.type === 'text' || p.type === 'reasoning');
+             const rcontent = textParts.map(p => p.text || '').join('');
+
+             const newMessage = {
+                 id: response.info.id,
+                 role: response.info.role || 'assistant',
+                 content: rcontent,
+                 parts: response.parts,
+                 streaming: false,
+                 time: response.info.time || { created: Date.now() },
+                 status: response.info.status,
+                 finish: response.info.finish
+             };
+             
+             const existingIndex = prev.findIndex(m => m.id === response.info.id);
+             if (existingIndex >= 0) {
+                 // Update only if the existing message is not already completed
+                 if (prev[existingIndex].status !== 'completed' && prev[existingIndex].finish !== 'stop') {
+                     const newMessages = [...prev]
+                     newMessages[existingIndex] = { ...newMessages[existingIndex], ...newMessage }
+                     return newMessages
+                 }
+                 return prev;
+             } else {
+                 return [...prev, newMessage]
+             }
+         });
+         setIsProcessing(false);
+         setActivity(null);
+      }
 
     } catch (err) {
       console.error('[OpenCode] Failed to send message:', err)
