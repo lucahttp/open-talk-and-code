@@ -1,0 +1,18 @@
+wing: open_talk_and_code
+rooms:
+- name: prompts
+  description: Files from prompts/
+- name: public
+  description: Files from public/
+- name: scripts
+  description: Files from scripts/
+- name: src
+  description: Files from src/
+- name: design
+  description: Files from assets/
+- name: frontend
+  description: Files from components/
+- name: backend
+  description: Files from services/
+- name: general
+  description: Files that don't fit other rooms

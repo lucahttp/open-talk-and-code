@@ -1,43 +1,21 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
-import { useOpenCode } from './hooks/useOpenCode'
-import { useTranscriber } from './hooks/useTranscriber'
-import { useHeyBuddy } from './hooks/useHeyBuddy'
-import { useAudioVisualization, useMultiLineVisualization } from './hooks/useAudioVisualization'
-import { useTTS } from './hooks/useTTS'
-import { useWebSocket } from './hooks/useWebSocket'
-import { useConversationStateMachine, STATES } from './hooks/useConversationStateMachine'
-import { useGracePeriodProcessor } from './hooks/useGracePeriodProcessor'
-import { useBargeInTTS } from './hooks/useBargeInTTS'
-import { useQuickListen } from './hooks/useQuickListen'
-import { GracePeriodBar } from './components/GracePeriodBar'
-import { SpeakingGlowBorder } from './components/SpeakingGlowBorder'
-import { QuickListenBar } from './components/QuickListenBar'
-import { HeyBuddy } from './services/HeyBuddy'
-import { pipeline, env, AutoTokenizer, AutoModelForCausalLM } from '@huggingface/transformers'
-import tts from './services/tts'
-import chiptune from './services/chiptune'
-import intentClassifier from './services/intent'
-import gsap from 'gsap'
-import './index.css'
+import React, { useEffect, useCallback } from 'react';
+import gsap from 'gsap';
+import './index.css';
 
-// Configure HuggingFace environment
-const HF_TOKEN = import.meta.env.VITE_HF_TOKEN || null
+import { VoiceAgentProvider, useVoiceAgent } from './contexts/VoiceAgentContext';
+import { ASCIIHeader } from './components/ASCIIHeader';
+import { StatusBar } from './components/StatusBar';
+import { LoadingScreen } from './components/LoadingScreen';
+import { WakeWordVisualizer, SpeechVisualizer } from './components/Visualizers';
+import { SessionList } from './components/SessionList';
+import { ChatLog } from './components/ChatLog';
+import { Controls } from './components/Controls';
+import { GracePeriodBar } from './components/GracePeriodBar';
+import { SpeakingGlowBorder } from './components/SpeakingGlowBorder';
+import { QuickListenBar } from './components/QuickListenBar';
 
-// Configure transformers.js cache
-env.allowLocalModels = true
-env.allowRemoteModels = true
-env.useBrowserCache = true
-env.cacheDir = '/models'
-
-// Log token status
-if (HF_TOKEN) {
-  console.log('[HF] Token configured - will use for gated models')
-} else {
-  console.log('[HF] No token configured - gated models may fail with 401')
-}
-
-// Hey Buddy Configuration - Models hosted on HuggingFace
-const ROOT_URL = "https://huggingface.co/benjamin-paine/hey-buddy/resolve/main";
+// Hey Buddy Configuration
+export const ROOT_URL = "https://huggingface.co/benjamin-paine/hey-buddy/resolve/main";
 export const WAKE_WORDS = ["buddy", "hey buddy", "hi buddy", "sup buddy", "yo buddy", "okay buddy", "hello buddy"];
 
 export const COLORS = {
@@ -60,1127 +38,30 @@ const heyBuddyOptions = {
   embeddingModelPath: `${ROOT_URL}/pretrained/speech-embedding.onnx`,
 };
 
-// Loading Screen Component - Shows progress of model downloads
-const LoadingScreen = ({ progress, status, onComplete }) => {
-  const totalModels = 5; // Hey Buddy models + Whisper + FunctionGemma
-  const completedModels = Object.values(progress).filter(p => p === 100).length;
-  const totalProgress = Object.values(progress).reduce((sum, p) => sum + p, 0) / totalModels;
-  
-  // Check Web Speech API support
-  const webSpeechSupported = typeof window !== 'undefined' && 
-    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
-  
-  return (
-    <div className="fixed inset-0 bg-black flex flex-col items-center justify-center z-50">
-      <pre className="ascii-header text-[10px] leading-[1.2] text-terminal mb-8 select-none">
-{`╔═══════════════════════════════════════════════════════════════╗
-║  ██╗   ██╗ ██████╗ ██╗ ██████╗███████╗                       ║
-║  ██║   ██║██╔═══██╗██║██╔════╝██╔════╝                       ║
-║  ██║   ██║██║   ██║██║██║     █████╗                         ║
-║  ╚██╗ ██╔╝██║   ██║██║██║     ██╔══╝                         ║
-║   ╚████╔╝ ╚██████╔╝██║╚██████╗██║                            ║
-║    ╚═══╝   ╚═════╝ ╚═╝ ╚═════╝╚═╝     ███████╗ ██████╗ ███████║
-║                                       ██╔════╝██╔═══██╗██╔════╝
-║                                       ██║     ██║   ██║███████╗
-║                                       ██║     ██║   ██║╚════██║
-║                                       ╚██████╗╚██████╔╝███████║
-║                                        ╚═════╝ ╚═════╝ ╚══════╝
-╚═══════════════════════════════════════════════════════════════╝`}
-      </pre>
-      
-      <div className="w-96 border border-terminal p-4 bg-black">
-        <div className="text-terminal text-sm mb-2 font-mono">
-          INITIALIZING AI MODELS...
-        </div>
-        
-        {/* Progress Bar */}
-        <div className="w-full h-4 border border-terminal bg-black mb-4">
-          <div 
-            className="h-full bg-terminal transition-all duration-300"
-            style={{ width: `${Math.round(totalProgress)}%` }}
-          />
-        </div>
-        
-        <div className="text-terminal text-xs font-mono mb-4">
-          {Math.round(totalProgress)}% Complete ({completedModels}/{totalModels} models)
-        </div>
-        
-        {/* Individual Model Status */}
-        <div className="space-y-1 text-xs font-mono">
-          {Object.entries(progress).map(([name, p]) => (
-            <div key={name} className="flex justify-between">
-              <span className={p === 100 ? 'text-terminal' : 'text-gray-500'}>
-                {p === 100 ? '✓' : '⏳'} {name}
-              </span>
-              <span className={p === 100 ? 'text-terminal' : 'text-gray-500'}>
-                {p}%
-              </span>
-            </div>
-          ))}
-        </div>
-        
-        {/* Fallback Status */}
-        <div className="mt-3 pt-2 border-t border-gray-700">
-          <div className="text-gray-500 text-xs font-mono mb-1">FALLBACK METHODS:</div>
-          <div className={`text-xs font-mono ${webSpeechSupported ? 'text-terminal' : 'text-red-500'}`}>
-            {webSpeechSupported ? '✓ Web Speech API (browser built-in)' : '✗ Web Speech API (not supported)'}
-          </div>
-          <div className="text-terminal text-xs font-mono">
-            ✓ Regex Intent Classification (always available)
-          </div>
-        </div>
-        
-        <div className={`mt-4 text-xs font-mono ${status.includes('Error') ? 'text-red-500 font-bold animate-pulse' : 'text-gray-500'}`}>
-          {status}
-        </div>
-      </div>
-      {status.includes('Error') && (
-        <button 
-          onClick={() => window.location.reload()} 
-          className="mt-4 border border-red-500 text-red-500 px-4 py-2 hover:bg-red-500 hover:text-black transition-colors"
-        >
-          RETRY BOOT
-        </button>
-      )}
-    </div>
-  );
-};
-
-// Components
-const ASCIIHeader = () => (
-  <pre className="ascii-header text-[10px] leading-[1.2] text-terminal mb-4 select-none">
-{`╔═══════════════════════════════════════════════════════════════╗
-║  ██╗   ██╗ ██████╗ ██╗ ██████╗███████╗                       ║
-║  ██║   ██║██╔═══██╗██║██╔════╝██╔════╝                       ║
-║  ██║   ██║██║   ██║██║██║     █████╗                         ║
-║  ╚██╗ ██╔╝██║   ██║██║██║     ██╔══╝                         ║
-║   ╚████╔╝ ╚██████╔╝██║╚██████╗██║                            ║
-║    ╚═══╝   ╚═════╝ ╚═╝ ╚═════╝╚═╝     ███████╗ ██████╗ ███████║
-║                                       ██╔════╝██╔═══██╗██╔════╝
-║                                       ██║     ██║   ██║███████╗
-║                                       ██║     ██║   ██║╚════██║
-║                                       ╚██████╗╚██████╔╝███████║
-║                                        ╚═════╝ ╚═════╝ ╚══════╝
-╚═══════════════════════════════════════════════════════════════╝`}
-  </pre>
-)
-
-// Activity Status Component - Shows real-time OpenCode activity
-const ActivityStatus = ({ activity }) => {
-  if (!activity) return null;
-  
-  const getIcon = () => {
-    switch (activity.type) {
-      case 'thinking': return '🧠';
-      case 'generating': return '✨';
-      case 'processing': return '⚙️';
-      case 'tool': return '🔧';
-      case 'command': return '⌨️';
-      case 'sending': return '📤';
-      default: return '⏳';
-    }
-  };
-  
-  return (
-    <div className="flex items-center gap-2 text-xs text-cyan-400 animate-pulse border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 rounded">
-      <span>{getIcon()}</span>
-      <span className="font-mono">{activity.message}</span>
-      <span className="inline-flex">
-        <span className="animate-bounce">.</span>
-        <span className="animate-bounce" style={{ animationDelay: '0.1s' }}>.</span>
-        <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>.</span>
-      </span>
-    </div>
-  );
-};
-
-const StatusBar = ({ 
-  connected, 
-  sessionName, 
-  isListening,
-  isRecording,
-  isSpeaking,
-  isTranscribing,
-  isGenerating,
-  isProcessing,
-  ttsEnabled,
-  activeWakeWords,
-  activity,
-  transcriptionMethod,
-  webSpeechSupported,
-  wsConnected
-}) => {
-  const getStatus = () => {
-    if (isRecording) return { icon: '🔴', text: 'RECORDING', color: 'text-red-500' };
-    if (isTranscribing) return { 
-      icon: '📝', 
-      text: transcriptionMethod === 'webspeech' ? 'TRANSCRIBING (Web Speech)' : 'TRANSCRIBING (Whisper)', 
-      color: 'text-cyan-400' 
-    };
-    if (isProcessing || isGenerating) return { icon: '⚡', text: 'PROCESSING', color: 'text-cyan-400 animate-pulse' };
-    if (isSpeaking) return { icon: '🔊', text: 'SPEAKING', color: 'text-orange-400' };
-    if (isListening && activeWakeWords.length > 0) return { 
-      icon: '🎯', 
-      text: `HEY ${activeWakeWords[0].toUpperCase()}!`, 
-      color: 'text-terminal animate-pulse' 
-    };
-    if (isListening) return { icon: '👂', text: 'LISTENING', color: 'text-terminal animate-pulse' };
-    return { icon: '🔇', text: 'IDLE', color: 'text-gray-500' };
-  };
-  
-  const status = getStatus();
-  
-  return (
-    <div className="flex items-center justify-between border border-gray-600 p-2 mb-2 bg-black">
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className={`text-lg ${status.color}`}>
-          {status.icon}
-        </span>
-        <span className={`text-sm ${status.color}`}>
-          {status.text}
-        </span>
-        {activity && <ActivityStatus activity={activity} />}
-        {wsConnected && (
-          <span className="text-xs text-purple-400 ml-2" title="WebSocket live stream active">
-            [LIVE]
-          </span>
-        )}
-        {transcriptionMethod === 'webspeech' && (
-          <span className="text-xs text-yellow-400 ml-2" title="Using browser Web Speech API (Whisper unavailable)">
-            [FALLBACK]
-          </span>
-        )}
-        {ttsEnabled && (
-          <span className="text-xs text-orange-400 ml-2">
-            [TTS]
-          </span>
-        )}
-        {!connected && (
-          <span className="text-xs text-red-500 ml-2">
-            [DISCONNECTED]
-          </span>
-        )}
-      </div>
-      <div className="text-xs text-terminal">
-        {connected ? `CONNECTED: ${sessionName || 'NONE'}` : 'OFFLINE'}
-      </div>
-    </div>
-  )
-}
-
-const SessionList = ({ sessions, selectedId, onSelect, onCreate, loading }) => (
-  <div className="border border-gray-600 p-2 mb-4 bg-black">
-    <div className="text-xs text-terminal mb-2 pb-1 border-b border-gray-600">
-      ┌─ SESSIONS ─────────────────────────────┐
-    </div>
-    <div className="space-y-1 max-h-48 overflow-y-auto">
-      {loading ? (
-        <div className="text-xs text-gray-500 italic">
-          Loading...
-        </div>
-      ) : sessions.length === 0 ? (
-        <div className="text-xs text-gray-500 italic">
-          No sessions found
-        </div>
-      ) : (
-        sessions.map(s => (
-          <button
-            key={s.id}
-            onClick={() => onSelect(s.id)}
-            className={`w-full text-left text-xs p-1 border ${
-              selectedId === s.id 
-                ? 'border-terminal bg-terminal/10 text-terminal' 
-                : 'border-gray-600 text-gray-400 hover:border-terminal hover:text-terminal'
-            }`}
-          >
-            {selectedId === s.id ? '▶' : ' '} {s.title || s.id}
-          </button>
-        ))
-      )}
-    </div>
-    <button
-      onClick={onCreate}
-      disabled={loading}
-      className="w-full mt-2 text-xs border border-terminal text-terminal p-1 
-                 hover:bg-terminal hover:text-black transition-colors disabled:opacity-50"
-    >
-      + NEW SESSION
-    </button>
-  </div>
-)
-
-const ChatLog = ({ messages, isProcessing, activity, streamingContent }) => {
-  const messagesEndRef = useRef(null)
-  const containerRef = useRef(null)
-  const [expandedReasoning, setExpandedReasoning] = useState(new Set())
-
-  // Auto-scroll to bottom when messages change
-  useEffect(() => {
-    if (containerRef.current) {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight
-    }
-  }, [messages, streamingContent, activity])
-
-  // Check if last message is from user (waiting for response)
-  const lastMessageIsUser = messages.length > 0 && messages[messages.length - 1]?.role === 'user'
-
-  // Check if we have a streaming message
-  const lastMessage = messages[messages.length - 1]
-  const isStreaming = lastMessage?.streaming || (isProcessing && streamingContent)
-
-  // Get detailed status message
-  const getStatusMessage = () => {
-    if (activity) {
-      return activity.message;
-    }
-    if (isProcessing || lastMessageIsUser) {
-      return 'Processing request...';
-    }
-    return null;
-  };
-
-  const statusMessage = getStatusMessage();
-
-  // Toggle reasoning visibility
-  const toggleReasoning = (msgId) => {
-    setExpandedReasoning(prev => {
-      const newSet = new Set(prev)
-      if (newSet.has(msgId)) {
-        newSet.delete(msgId)
-      } else {
-        newSet.add(msgId)
-      }
-      return newSet
-    })
-  }
-
-  // Extract reasoning text from parts
-  const getReasoningText = (parts) => {
-    if (!parts) return ''
-    return parts
-      .filter(p => p.type === 'reasoning')
-      .map(p => p.reasoning || p.text || '')
-      .join(' ')
-  }
-
-  return (
-    <div
-      ref={containerRef}
-      className="border border-gray-600 p-2 mb-4 bg-black flex-1 overflow-y-auto min-h-0"
-    >
-      <div className="text-xs text-terminal mb-2 pb-1 border-b border-gray-600 sticky top-0 bg-black">
-        ┌─ CHAT LOG ({messages.length} messages) ─┐
-      </div>
-      <div className="space-y-3">
-        {messages.length === 0 ? (
-          <div className="text-xs text-gray-500 italic text-center py-8">
-            Say &quot;Hey Buddy&quot; to start a conversation
-          </div>
-        ) : (
-          messages.map((m, i) => {
-            const reasoningText = getReasoningText(m.parts)
-            const hasReasoning = reasoningText.length > 0
-            const isExpanded = expandedReasoning.has(m.id)
-            const isWebSocket = m.source === 'websocket'
-
-            return (
-              <div
-                key={m.id || `msg_${i}`}
-                className="text-xs animate-in fade-in"
-                style={{ animationDelay: `${i * 50}ms` }}
-              >
-                <div className={`font-bold ${m.role === 'user' ? 'text-terminal' : isWebSocket ? 'text-purple-400' : 'text-cyan-400'}`}>
-                  {m.role === 'user' ? '> YOU' : isWebSocket ? '📡 LIVE:' : 'AI:'}
-                </div>
-                <div className={`pl-2 ${m.role === 'user' ? 'text-terminal' : isWebSocket ? 'text-purple-300' : 'text-gray-300'} whitespace-pre-wrap font-mono leading-relaxed`}>
-                  {/* For the last assistant message during streaming, show streamingContent */}
-                  {m.role === 'assistant' && i === messages.length - 1 && streamingContent && !isWebSocket
-                    ? <>{streamingContent}<span className="animate-pulse">▌</span></>
-                    : (m.content || '')
-                  }
-                </div>
-
-                {/* Expandable reasoning section */}
-                {hasReasoning && (
-                  <div className="mt-1">
-                    <button
-                      onClick={() => toggleReasoning(m.id)}
-                      className="pl-2 text-xs text-gray-500 hover:text-terminal flex items-center gap-1 transition-colors"
-                    >
-                      <span>{isExpanded ? '▼' : '▶'}</span>
-                      <span className="italic">
-                        {isExpanded ? 'Hide thinking process' : 'Show thinking process'}
-                      </span>
-                    </button>
-                    {isExpanded && (
-                      <div className="ml-4 mt-1 pl-2 border-l-2 border-gray-600 text-gray-500 italic whitespace-pre-wrap">
-                        {reasoningText}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })
-        )}
-        
-        {/* Show detailed status indicator when processing */}
-        {/* Status indicator */}
-        {(isProcessing || isStreaming) && (
-          <div className="border border-terminal/30 bg-terminal/5 p-2">
-            <div className="text-xs text-terminal flex items-center gap-2">
-              <span className="animate-pulse">⚡</span>
-              <span className="font-mono">{statusMessage || 'Generating...'}</span>
-              <span className="inline-flex">
-                <span className="animate-bounce">.</span>
-                <span className="animate-bounce" style={{ animationDelay: '0.1s' }}>.</span>
-                <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>.</span>
-              </span>
-            </div>
-          </div>
-        )}
-        
-        <div ref={messagesEndRef} />
-      </div>
-    </div>
-  )
-}
-
-const Controls = ({ settings, onToggle, transcriptionMethod, webSpeechSupported }) => (
-  <div className="flex items-center justify-between text-xs border-t border-gray-600 pt-2 mt-2">
-    <div className="flex gap-4">
-      <button 
-        onClick={() => onToggle('tts')}
-        className={`${settings.tts ? 'text-terminal' : 'text-gray-500'}`}
-      >
-        [TTS: {settings.tts ? 'ON' : 'OFF'}]
-      </button>
-      <button 
-        onClick={() => onToggle('chiptune')}
-        className={`${settings.chiptune ? 'text-terminal' : 'text-gray-500'}`}
-      >
-        [SFX: {settings.chiptune ? 'ON' : 'OFF'}]
-      </button>
-      {webSpeechSupported && (
-        <button 
-          onClick={() => onToggle('forceWebSpeech')}
-          className={`${settings.forceWebSpeech ? 'text-yellow-400' : transcriptionMethod === 'webspeech' ? 'text-yellow-400' : 'text-gray-500'}`}
-          title={transcriptionMethod === 'webspeech' ? 'Using Web Speech API (Whisper unavailable)' : settings.forceWebSpeech ? 'Forced Web Speech API' : 'Using Whisper'}
-        >
-          [STT: {settings.forceWebSpeech || transcriptionMethod === 'webspeech' ? 'Web Speech' : 'Whisper'}]
-        </button>
-      )}
-    </div>
-    <select 
-      value={settings.voice}
-      onChange={(e) => onToggle('voice', e.target.value)}
-      className="bg-black border border-terminal text-terminal text-xs p-1"
-    >
-      {['M1','M2','M3','M4','M5','F1','F2','F3','F4','F5'].map(v => (
-        <option key={v} value={v}>{v}</option>
-      ))}
-    </select>
-  </div>
-)
-
-// Wake Word Visualizer Component
-const WakeWordVisualizer = ({ wakeWords }) => {
-  const canvasRef = useRef(null);
-  
-  const colors = useMemo(() => {
-    const c = {};
-    for (const word of WAKE_WORDS) {
-      c[word] = COLORS[word];
-    }
-    return c;
-  }, []);
-  
-  const { pushValue, draw } = useMultiLineVisualization(canvasRef, colors);
-  
-  useEffect(() => {
-    for (const word of WAKE_WORDS) {
-      const key = word.replace(' ', '-');
-      const probability = wakeWords[key]?.probability || 0;
-      pushValue(word, probability);
-    }
-    draw();
-  }, [wakeWords, pushValue, draw]);
-  
-  return (
-    <canvas 
-      ref={canvasRef} 
-      width={300} 
-      height={100} 
-      className="border border-gray-600 bg-black/50"
-    />
-  );
-};
-
-// Speech Visualizer Component
-const SpeechVisualizer = ({ probability }) => {
-  const canvasRef = useRef(null);
-  
-  const { pushValue, draw } = useAudioVisualization(
-    canvasRef,
-    { color: COLORS.speech }
-  );
-  
-  useEffect(() => {
-    pushValue(probability);
-    draw();
-  }, [probability, pushValue, draw]);
-  
-  return (
-    <canvas 
-      ref={canvasRef} 
-      width={300} 
-      height={50} 
-      className="border border-gray-600 bg-black/50"
-    />
-  );
-};
-
-// Hook to preload all models with progress tracking
-const useModelLoader = (options) => {
-  const [isLoading, setIsLoading] = useState(true);
-  const [progress, setProgress] = useState({
-    'Hey Buddy Wake Words': 0,
-    'Silero VAD': 0,
-    'Speech Embedding': 0,
-    'Whisper Transcription': 0,
-    'FunctionGemma Intent': 0
-  });
-  const [status, setStatus] = useState('Checking cached models...');
-  const [modelsReady, setModelsReady] = useState(false);
-  const loadingRef = useRef(false);
-
-  useEffect(() => {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-
-    const loadModels = async () => {
-      try {
-        console.log('[ModelLoader] Step 1/2: Loading Hey Buddy...');
-        setStatus('Initializing Hey Buddy (WASM)...');
-        
-        const heyBuddy = new HeyBuddy(options);
-        
-        // Use real wait instead of fake timeout
-        await heyBuddy.waitUntilReady();
-        
-        setProgress(prev => ({
-          ...prev,
-          'Hey Buddy Wake Words': 100,
-          'Silero VAD': 100,
-          'Speech Embedding': 100
-        }));
-        
-        console.log('[ModelLoader] Step 2/2: Checking STT Fallback...');
-        setStatus('Whisper loads on-demand. Web Speech API ready.');
-        setProgress(prev => ({ ...prev, 'Whisper Transcription': 100, 'FunctionGemma Intent': 100 }));
-        
-        setStatus('All systems GO!');
-        setModelsReady(true);
-        setIsLoading(false);
-      } catch (err) {
-        console.error('[ModelLoader] Fatal error:', err);
-        setStatus(`Error: ${err.message}. Check console.`);
-        setIsLoading(false); // Stop loading to show error
-      }
-    };
-
-    loadModels();
-  }, []); // Run once on mount
-
-  return { isLoading, progress, status, modelsReady };
-};
-
-// Load settings from localStorage
-const loadSettings = () => {
-  try {
-    const saved = localStorage.getItem('voice-agent-settings')
-    if (saved) {
-      return JSON.parse(saved)
-    }
-  } catch (e) {
-    console.log('Failed to load settings:', e)
-  }
-  return {
-    tts: true,
-    chiptune: true,
-    voice: 'M1',
-    forceWebSpeech: false
-  }
-}
-
-// Save settings to localStorage
-const saveSettings = (settings) => {
-  try {
-    localStorage.setItem('voice-agent-settings', JSON.stringify(settings))
-  } catch (e) {
-    console.log('Failed to save settings:', e)
-  }
-}
-
-// Main App
-function App() {
-  const [settings, setSettings] = useState(loadSettings)
-  const [showPermissionPrompt, setShowPermissionPrompt] = useState(false)
-  const [showCreateSessionPopup, setShowCreateSessionPopup] = useState(false)
-  const lastMessageRef = useRef(null)
-  const pendingMessageRef = useRef(null)
-  const [showTranscriptionError, setShowTranscriptionError] = useState(null)
-
-  // Persist settings to localStorage
-  useEffect(() => {
-    saveSettings(settings)
-  }, [settings])
-
-  // Load models on startup
-  const { isLoading: isModelsLoading, progress, status, modelsReady } = useModelLoader(heyBuddyOptions);
-
-  // OpenCode connection
+function VoiceAgentApp() {
   const {
-    connected,
-    connecting,
-    error: apiError,
-    sessions,
-    selectedSession,
-    messages,
-    activity,
-    isProcessing: isOpenCodeProcessing,
-    streamingContent,
-    createSession,
-    selectSession,
-    sendMessage,
-    executeCommand,
-    connect
-  } = useOpenCode()
-
-  // TTS Hook
-  const { speak: browserSpeak, cancel: cancelTTS, isSpeaking } = useTTS();
-
-  // Transcription hook
-  const {
-    transcript,
-    isTranscribing,
-    isModelLoading: isTranscriberLoading,
-    progress: transcriptionProgress,
-    error: transcriptionError,
-    transcriptionMethod,
-    transcribe,
-    clear: clearTranscript,
-    transcribeWithWebSpeech,
-    webSpeechSupported,
-  } = useTranscriber();
-
-  // Show transcription errors
-  useEffect(() => {
-    if (transcriptionError) {
-      setShowTranscriptionError(transcriptionError);
-      const timer = setTimeout(() => setShowTranscriptionError(null), 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [transcriptionError]);
-
-  // Track if we're using Web Speech API fallback
-  const isWebSpeechFallback = transcriptionMethod === 'webspeech';
-
-  // Refs for conversation state (to avoid initialization order issues)
-  const conversationStateRef = useRef('idle');
-  const STATESRef = useRef({});
-  
-  // Ref to track if grace recorder is active (to ignore HeyBuddy callbacks)
-  const graceRecorderActiveRef = useRef(false);
-
-  // Ref for processGracePeriodAudio to avoid initialization order issues
-  const processGracePeriodAudioRef = useRef(null);
-
-  // Handle recording complete from Hey Buddy
-  // If grace period processing is active, pass audio to processor
-  // Otherwise use legacy transcription flow
-  const handleRecordingComplete = useCallback((audioSamples) => {
-    console.log('[App] Recording complete from HeyBuddy:', audioSamples.length, 'samples');
+    settings, handleToggle,
+    isModelsLoading, modelsReady, progress, status,
+    showPermissionPrompt, setShowPermissionPrompt, handleAllowMicrophone,
+    showCreateSessionPopup, handleCreateSessionAndSend, handleCancelCreateSession, pendingMessageRef,
+    showTranscriptionError,
     
-    // If grace period processing is active, pass audio to processor
-    if (graceRecorderActiveRef.current && processGracePeriodAudioRef.current) {
-      console.log('[App] Passing audio to grace period processor');
-      processGracePeriodAudioRef.current(audioSamples);
-      return;
-    }
+    openCodeApi, transcriberApi, heyBuddyApi, conversationMachine,
     
-    // Legacy flow: Transcribe directly
-    console.log('[App] Using legacy transcription flow');
-    
-    const useWebSpeech = settings.forceWebSpeech || transcriptionMethod === 'webspeech';
-    
-    if (useWebSpeech && webSpeechSupported) {
-      transcribeWithWebSpeech('en-US');
-    } else {
-      clearTranscript();
-      transcribe(audioSamples, 'en');
-    }
-    
-    if (settings.chiptune) {
-      chiptune.playRecordingStart();
-    }
-  }, [settings.forceWebSpeech, transcriptionMethod, webSpeechSupported, settings.chiptune, transcribeWithWebSpeech, clearTranscript, transcribe]);
+    combinedMessages, activeWakeWords
+  } = useVoiceAgent();
 
-  // Hey Buddy hook
-  const {
-    isInitialized,
-    isRecording,
-    isListening,
-    speechProbability,
-    wakeWords,
-    permissionStatus,
-    start,
-    stop,
-    pause,
-    resume,
-    startRecording: startHeyBuddyRecording,
-    stopRecording: stopHeyBuddyRecording,
-    requestMicrophonePermission,
-  } = useHeyBuddy(heyBuddyOptions, handleRecordingComplete);
+  const { connected, connecting, sessions, selectedSession, selectSession, createSession, isProcessing, activity, streamingContent, connect } = openCodeApi;
+  const { isTranscribing, isModelLoading: isTranscriberLoading, progress: transcriptionProgress, transcriptionMethod, webSpeechSupported } = transcriberApi;
+  const { isInitialized, isRecording, isListening, speechProbability, wakeWords: wakeWordsState } = heyBuddyApi;
+  const { state: conversationState, STATES, graceSeconds, quickListenSeconds } = conversationMachine;
 
-  // Ref for handleWakeWordDetected to avoid initialization order issues
-  const handleWakeWordDetectedRef = useRef(null);
-
-  // Watch for wake word detection from HeyBuddy
-  const prevWakeWordsRef = useRef({});
-  useEffect(() => {
-    // Check if any wake word is detected
-    const detectedWakeWord = Object.entries(wakeWords).find(([word, active]) => active);
-    const prevDetected = Object.entries(prevWakeWordsRef.current).find(([word, active]) => active);
-    
-    if (detectedWakeWord && !prevDetected && handleWakeWordDetectedRef.current) {
-      console.log('[App] Wake word detected:', detectedWakeWord[0]);
-      handleWakeWordDetectedRef.current();
-    }
-    
-    prevWakeWordsRef.current = { ...wakeWords };
-  }, [wakeWords]);
-
-  // WebSocket connection for live streaming
-  const WS_URL = selectedSession?.id 
-    ? `ws://localhost:4096/share_poll?id=${selectedSession.id}`
-    : null;
-  const {
-    connected: wsConnected,
-    messages: wsMessages,
-    error: wsError,
-    clearMessages: clearWsMessages,
-  } = useWebSocket(WS_URL);
-
-  // New Conversation State Machine
-  const {
-    state: conversationState,
-    STATES,
-    graceSeconds,
-    quickListenSeconds,
-    isListeningForBargeIn,
-    currentParagraph,
-    totalParagraphs,
-    startRecording: startConversationRecording,
-    startGracePeriod,
-    interruptGracePeriod,
-    startTranscribing,
-    startSending,
-    startSpeaking,
-    updateParagraph,
-    onBargeIn,
-    resumeFromPause,
-    onSpeakingComplete,
-    onQuickListenTranscript,
-    cancelQuickListen,
-    resetToIdle,
-  } = useConversationStateMachine({
-    onStateChange: (newState, data) => {
-      console.log('[App] Conversation state:', newState, data);
-      // Update ref for handleRecordingComplete access
-      conversationStateRef.current = newState;
-    },
-    onGracePeriodTick: (seconds) => {
-      // Play chiptune on reset
-      if (seconds === 5 && settings.chiptune) {
-        chiptune.playGracePeriodReset();
-      }
-    },
-    onQuickListenTick: (seconds) => {
-      // Could play warning sound at 3s remaining
-    },
-  });
-
-  // Update STATES ref after initialization
-  useEffect(() => {
-    STATESRef.current = STATES;
-  }, [STATES]);
-
-  // Ref for resumeHeyBuddy to avoid initialization order issues
-  const resumeHeyBuddyRef = useRef(null);
-
-  // Grace Period Processor Hook (receives audio from HeyBuddy)
-  const {
-    processAudio: processGracePeriodAudio,
-    isProcessing: isGraceProcessing,
-    isInGracePeriod,
-    graceSeconds: processorGraceSeconds,
-    resetState: resetGraceProcessor,
-  } = useGracePeriodProcessor({
-    onComplete: async (audioBuffer) => {
-      // Stop HeyBuddy recording
-      stopHeyBuddyRecording();
-      
-      // Reset flag
-      graceRecorderActiveRef.current = false;
-      console.log('[App] Grace period completed, deactivating flag');
-      
-      if (!audioBuffer) {
-        resetToIdle();
-        return;
-      }
-      
-      startTranscribing();
-      
-      // Convert and transcribe
-      try {
-        const audioData = audioBuffer.getChannelData(0);
-        clearTranscript();
-        transcribe(audioData, 'en');
-      } catch (err) {
-        console.error('[App] Transcription error:', err);
-        resetToIdle();
-      }
-    },
-    onGraceTick: (seconds) => {
-      // Sync with state machine
-      if (seconds < 5 && conversationState === STATES.RECORDING) {
-        startGracePeriod();
-      }
-    },
-    onInterrupt: () => {
-      interruptGracePeriod();
-    },
-  });
-
-  // Sync HeyBuddy recording with state machine
-  useEffect(() => {
-    if (conversationState === STATES.IDLE) {
-      stopHeyBuddyRecording();
-    }
-  }, [conversationState, STATES.IDLE, stopHeyBuddyRecording]);
-
-  // Update ref for processGracePeriodAudio
-  useEffect(() => {
-    processGracePeriodAudioRef.current = processGracePeriodAudio;
-  }, [processGracePeriodAudio]);
-
-  // Barge-in TTS Hook
-  const {
-    speakParagraphs,
-    pause: pauseTTS,
-    resume: resumeTTS,
-    stop: stopBargeInTTS,
-    isSpeaking: isBargeInSpeaking,
-    isPaused: isTTSPaused,
-    currentParagraph: bargeInCurrentParagraph,
-    totalParagraphs: bargeInTotalParagraphs,
-  } = useBargeInTTS({
-    onBargeIn: (command) => {
-      onBargeIn(command);
-      if (command === 'stop') {
-        stopBargeInTTS();
-        // Start quick listen
-        startQuickListenTimer();
-      } else if (command === 'pause') {
-        pauseTTS();
-      }
-    },
-    onComplete: () => {
-      onSpeakingComplete();
-      startQuickListenTimer();
-    },
-    onParagraph: (index) => {
-      updateParagraph(index);
-    },
-  });
-
-  // Quick Listen Hook
-  const {
-    start: startQuickListenHook,
-    stop: stopQuickListen,
-    secondsRemaining: hookQuickListenSeconds,
-    transcript: quickListenTranscript,
-  } = useQuickListen({
-    duration: 15000,
-    onTranscript: (text) => {
-      onQuickListenTranscript(text);
-      handleQuickListenMessage(text);
-    },
-    onTimeout: () => {
-      resetToIdle();
-      // Reset grace processor flag after timeout
-      graceRecorderActiveRef.current = false;
-      resetGraceProcessor();
-    },
-    onCancel: () => {
-      cancelQuickListen();
-      // Reset grace processor flag after cancel
-      graceRecorderActiveRef.current = false;
-      resetGraceProcessor();
-    },
-  });
-
-  // Start quick listen helper
-  const startQuickListenTimer = useCallback(() => {
-    if (settings.chiptune) {
-      chiptune.playStartRecording(); // Indicate we're listening
-    }
-    startQuickListenHook();
-  }, [startQuickListenHook, settings.chiptune]);
-
-  // Handle message from quick listen
-  const handleQuickListenMessage = useCallback(async (text) => {
-    if (!text.trim() || !connected || !selectedSession) return;
-    
-    // Classify intent
-    const intent = await intentClassifier.classify(text);
-    
-    if (intent.type === 'command' && (intent.action === '/interrupt' || intent.action === '/stop')) {
-      resetToIdle();
-      // Reset grace processor flag
-      graceRecorderActiveRef.current = false;
-      resetGraceProcessor();
-      return;
-    }
-    
-    // Send as normal message
-    startSending();
-    try {
-      await sendMessage(text);
-      // Response will come through SSE and trigger TTS
-      // Grace processor flag will be reset after TTS completes
-    } catch (err) {
-      console.error('[App] Quick listen send error:', err);
-      resetToIdle();
-      // Reset grace processor flag on error
-      graceRecorderActiveRef.current = false;
-      resetGraceProcessor();
-    }
-  }, [connected, selectedSession, sendMessage, startSending, resetToIdle, resetGraceProcessor]);
-
-  // Modified wake word handler - activates grace period processing mode
-  // Note: We don't pause HeyBuddy to keep its visualizer active
-  const handleWakeWordDetected = useCallback(() => {
-    if (conversationState === STATES.IDLE || conversationState === STATES.QUICK_LISTEN) {
-      // Stop any ongoing quick listen
-      if (conversationState === STATES.QUICK_LISTEN) {
-        stopQuickListen();
-        resetGraceProcessor();
-      }
-      
-      // Play wake word chiptune
-      if (settings.chiptune) {
-        chiptune.playWakeWordDetected();
-      }
-      
-      // Mark grace processor as active (to process HeyBuddy audio with grace period)
-      graceRecorderActiveRef.current = true;
-      console.log('[App] Grace period processing activated, waiting for HeyBuddy audio');
-      
-      // Start the conversation flow
-      startConversationRecording();
-    }
-  }, [conversationState, startConversationRecording, stopQuickListen, settings.chiptune, resetGraceProcessor]);
-
-  // Wrapper function to resume HeyBuddy and reset grace recorder flag
-  const resumeHeyBuddy = useCallback(() => {
-    graceRecorderActiveRef.current = false;
-    console.log('[App] Grace recorder deactivated, HeyBuddy callbacks enabled');
-    resume();
-  }, [resume]);
-
-  // Update ref for the wake word detection useEffect
-  useEffect(() => {
-    handleWakeWordDetectedRef.current = handleWakeWordDetected;
-  }, [handleWakeWordDetected]);
-
-  // Update the original recording complete handler
-  useEffect(() => {
-    // When transcriber has a final result
-    if (transcript?.text && !transcript.isBusy && conversationState === STATES.TRANSCRIBING) {
-      const text = transcript.text;
-      
-      // Filter out common Whisper hallucinations/noise
-      const noisePatterns = [
-        /\(speaking in foreign language\)/i,
-        /\(upbeat music\)/i,
-        /\[music\]/i,
-        /\[silence\]/i,
-        /thank you for watching/i,
-        /subscribe to my channel/i
-      ];
-      
-      const isNoise = noisePatterns.some(pattern => pattern.test(text));
-      
-      if (isNoise) {
-        console.log('[App] Ignoring Whisper noise/hallucination:', text);
-        resetToIdle();
-        graceRecorderActiveRef.current = false;
-        resetGraceProcessor();
-        clearTranscript();
-        return;
-      }
-
-      // Remove wake words
-      let cleanedText = text;
-      for (const wakeWord of WAKE_WORDS) {
-        const regex = new RegExp(`^\\s*${wakeWord}[,\\s]*`, 'i');
-        cleanedText = cleanedText.replace(regex, '').trim();
-      }
-      
-      // Check if we have connection and session
-      if (!connected) {
-        console.log('[App] Not connected to OpenCode, cannot send');
-        chiptune.playError?.();
-        resetToIdle();
-        graceRecorderActiveRef.current = false;
-        resetGraceProcessor();
-        clearTranscript();
-        return;
-      }
-      
-      if (!selectedSession) {
-        console.log('[App] No session selected, showing create session popup');
-        // Save the pending message
-        pendingMessageRef.current = cleanedText;
-        // Show popup for creating session
-        setShowCreateSessionPopup(true);
-        // Reset state but keep transcript for later
-        resetToIdle();
-        graceRecorderActiveRef.current = false;
-        resetGraceProcessor();
-        clearTranscript();
-        return;
-      }
-      
-      if (cleanedText) {
-        console.log('[App] Sending to OpenCode:', cleanedText);
-        startSending();
-        
-        sendMessage(cleanedText).then(() => {
-          if (settings.chiptune) {
-            chiptune.playSuccess();
-          }
-          // Reset grace processor flag after message sent successfully
-          graceRecorderActiveRef.current = false;
-          resetGraceProcessor();
-        }).catch((err) => {
-          console.error('[App] Send failed:', err);
-          if (settings.chiptune) {
-            chiptune.playError();
-          }
-          resetToIdle();
-          // Reset grace processor flag on error too
-          graceRecorderActiveRef.current = false;
-          resetGraceProcessor();
-        });
-      } else {
-        // No content, reset flag
-        resetToIdle();
-        graceRecorderActiveRef.current = false;
-        resetGraceProcessor();
-      }
-      
-      clearTranscript();
-    }
-  }, [transcript, conversationState, connected, selectedSession, sendMessage, clearTranscript, startSending, resetToIdle, settings.chiptune, resetGraceProcessor]);
-
-  // Watch for OpenCode responses and speak them
-  useEffect(() => {
-    const lastMessage = messages[messages.length - 1];
-    
-    if (lastMessage && lastMessage.role === 'assistant' && lastMessage.id !== lastMessageRef.current) {
-      lastMessageRef.current = lastMessage.id;
-      
-      if (settings.tts && lastMessage.content) {
-        // Start speaking state
-        const paragraphs = lastMessage.content
-          .split(/\n\n+|(?<=[.!?])\s+(?=[A-Z])/)
-          .map(p => p.trim())
-          .filter(p => p.length > 0);
-        
-        startSpeaking(paragraphs.length);
-        speakParagraphs(lastMessage.content);
-      }
-    }
-  }, [messages, settings.tts, startSpeaking, speakParagraphs]);
-
-  // Combine OpenCode messages with WebSocket messages
-  const combinedMessages = useMemo(() => {
-    const wsChatMessages = wsMessages.map((msg, index) => ({
-      id: `ws-${msg.timestamp || index}`,
-      role: 'assistant',
-      content: msg.text || JSON.stringify(msg),
-      timestamp: msg.timestamp || Date.now(),
-      source: 'websocket',
-    }));
-    
-    return [...messages, ...wsChatMessages];
-  }, [messages, wsMessages]);
-
-  // Pause listening during processing/speaking
-  useEffect(() => {
-    if (isTranscribing || isSpeaking || !connected) {
-      pause();
-    } else {
-      resume();
-    }
-  }, [isTranscribing, isSpeaking, connected, pause, resume]);
-
-  // Show permission prompt when models are ready
-  useEffect(() => {
-    if (modelsReady && permissionStatus === 'prompt') {
-      setShowPermissionPrompt(true);
-    }
-  }, [modelsReady, permissionStatus]);
-
-  // Permission handling
-  const handleAllowMicrophone = useCallback(async () => {
-    const granted = await requestMicrophonePermission();
-    if (granted) {
-      setShowPermissionPrompt(false);
-      await start();
-    }
-  }, [requestMicrophonePermission, start]);
-
-  // Active wake words
-  const activeWakeWords = useMemo(() => {
-    const active = [];
-    for (const word of WAKE_WORDS) {
-      const key = word.replace(' ', '-');
-      if (wakeWords[key]?.active) {
-        active.push(word);
-      }
-    }
-    return active;
-  }, [wakeWords]);
-
-  // Handle wake word detection with chiptune
+  // Handle wake word GSAP animation
   useEffect(() => {
     if (activeWakeWords.length > 0 && settings.chiptune) {
-      chiptune.playWakeWordDetected();
-      
-      // GSAP animation for border flash
       gsap.fromTo('.main-container',
-        { 
-          boxShadow: '0 0 0 4px #00ff00, inset 0 0 100px rgba(0, 255, 0, 0.2)'
-        },
-        { 
-          boxShadow: '0 0 0 0px transparent, inset 0 0 0px transparent',
-          duration: 0.6,
-          ease: 'power2.out'
-        }
+        { boxShadow: '0 0 0 4px #00ff00, inset 0 0 100px rgba(0, 255, 0, 0.2)' },
+        { boxShadow: '0 0 0 0px transparent, inset 0 0 0px transparent', duration: 0.6, ease: 'power2.out' }
       );
     }
   }, [activeWakeWords, settings.chiptune]);
@@ -1193,57 +74,9 @@ function App() {
     }
   }, [createSession, sessions.length])
 
-  // Handle creating session from popup and sending pending message
-  const handleCreateSessionAndSend = useCallback(async () => {
-    try {
-      console.log('[App] Creating session from popup...');
-      const newSession = await createSession(`Voice Session ${sessions.length + 1}`);
-      
-      if (newSession && pendingMessageRef.current) {
-        console.log('[App] Session created, sending pending message:', pendingMessageRef.current);
-        // Pass the new session ID explicitly to avoid state update race condition
-        await sendMessage(pendingMessageRef.current, { sessionId: newSession.id });
-        pendingMessageRef.current = null;
-        setShowCreateSessionPopup(false);
-        
-        if (settings.chiptune) {
-          chiptune.playSuccess();
-        }
-      }
-    } catch (err) {
-      console.error('[App] Failed to create session or send message:', err);
-      if (settings.chiptune) {
-        chiptune.playError();
-      }
-    }
-  }, [createSession, sessions.length, sendMessage, settings.chiptune])
-
-  // Handle canceling session creation
-  const handleCancelCreateSession = useCallback(() => {
-    console.log('[App] User canceled session creation, discarding message');
-    pendingMessageRef.current = null;
-    setShowCreateSessionPopup(false);
-    // Reset grace processor flag
-    graceRecorderActiveRef.current = false;
-    resetGraceProcessor();
-    resetToIdle();
-  }, [resetGraceProcessor, resetToIdle])
-
-  const handleToggle = useCallback((key, value) => {
-    if (key === 'voice') {
-      setSettings(s => ({ ...s, voice: value }));
-      tts.setVoice(value);
-    } else if (key === 'forceWebSpeech') {
-      setSettings(s => ({ ...s, forceWebSpeech: !s.forceWebSpeech }));
-    } else {
-      setSettings(s => ({ ...s, [key]: !s[key] }));
-    }
-  }, [])
-
   // Loading status
   const isLoading = isTranscriberLoading || connecting;
 
-  // Show loading screen while models are loading
   if (isModelsLoading || !modelsReady) {
     return <LoadingScreen progress={progress} status={status} />;
   }
@@ -1257,16 +90,15 @@ function App() {
         sessionName={selectedSession?.title || selectedSession?.id}
         isListening={isListening}
         isRecording={isRecording}
-        isSpeaking={isSpeaking}
+        isSpeaking={conversationState === STATES.SPEAKING}
         isTranscribing={isTranscribing}
         isGenerating={false}
-        isProcessing={isOpenCodeProcessing}
+        isProcessing={isProcessing}
         ttsEnabled={settings.tts}
         activeWakeWords={activeWakeWords}
         activity={activity}
         transcriptionMethod={transcriptionMethod}
         webSpeechSupported={webSpeechSupported}
-        wsConnected={wsConnected}
       />
       
       {isLoading && (
@@ -1275,30 +107,24 @@ function App() {
         </div>
       )}
       
-        {/* Transcription Error Toast */}
-        {showTranscriptionError && (
-          <div className="fixed top-4 right-4 z-50 border border-red-500 bg-black p-3 max-w-sm">
-            <div className="text-red-500 text-sm font-bold mb-1">⚠️ Transcription Error</div>
-            <div className="text-gray-400 text-xs">{showTranscriptionError}</div>
-            {webSpeechSupported && transcriptionMethod !== 'webspeech' && (
-              <div className="text-yellow-400 text-xs mt-2">
-                Switching to Web Speech API fallback...
-              </div>
-            )}
-            {!webSpeechSupported && (
-              <div className="text-red-400 text-xs mt-2">
-                Web Speech API not available in this browser.
-              </div>
-            )}
-          </div>
-        )}
+      {showTranscriptionError && (
+        <div className="fixed top-4 right-4 z-50 border border-red-500 bg-black p-3 max-w-sm">
+          <div className="text-red-500 text-sm font-bold mb-1">⚠️ Transcription Error</div>
+          <div className="text-gray-400 text-xs">{showTranscriptionError}</div>
+          {webSpeechSupported && transcriptionMethod !== 'webspeech' && (
+            <div className="text-yellow-400 text-xs mt-2">Switching to Web Speech API fallback...</div>
+          )}
+          {!webSpeechSupported && (
+            <div className="text-red-400 text-xs mt-2">Web Speech API not available in this browser.</div>
+          )}
+        </div>
+      )}
 
-      {/* Visualizers */}
       {isInitialized && (
         <div className="flex gap-4 mb-4">
           <div className="flex-1">
             <div className="text-xs text-gray-500 mb-1">Wake Word Detection</div>
-            <WakeWordVisualizer wakeWords={wakeWords} />
+            <WakeWordVisualizer wakeWords={wakeWordsState} />
           </div>
           <div className="w-64">
             <div className="text-xs text-gray-500 mb-1">Speech Activity</div>
@@ -1308,7 +134,6 @@ function App() {
       )}
       
       <div className="flex gap-4 flex-1 min-h-0">
-        {/* Sidebar */}
         <div className="w-64 flex flex-col">
           <SessionList 
             sessions={sessions}
@@ -1319,46 +144,13 @@ function App() {
           />
           
           <div className="text-xs text-gray-500 mt-auto space-y-2">
-            {/* WebSocket Status */}
-            <div className="border border-gray-600 p-2">
-              <div className="text-terminal mb-1">┌─ LIVE STREAM ─┐</div>
-              <div className="flex items-center gap-2">
-                <span className={wsConnected ? 'text-terminal' : 'text-red-500'}>
-                  {wsConnected ? '●' : '○'}
-                </span>
-                <span className={wsConnected ? 'text-terminal' : 'text-gray-500'}>
-                  {wsConnected ? 'CONNECTED' : 'DISCONNECTED'}
-                </span>
-              </div>
-              {wsConnected && (
-                <div className="text-gray-600 mt-1">
-                  {wsMessages.length} messages received
-                </div>
-              )}
-              {wsError && (
-                <div className="text-red-500 text-xs mt-1">
-                  Error: {wsError}
-                </div>
-              )}
-              <button
-                onClick={clearWsMessages}
-                className="mt-2 text-xs text-gray-500 hover:text-terminal border border-gray-600 px-2 py-1"
-              >
-                [CLEAR]
-              </button>
-            </div>
-            
-            {/* Help Section */}
             <div className="border border-gray-600 p-2">
               <div className="text-terminal mb-1">┌─ HELP ─┐</div>
               <div>Say &quot;Hey Buddy&quot;</div>
               <div>Or any wake word</div>
               <div className="text-gray-600 mt-1">v2.0.0 (Mortimer)</div>
               {!connected && (
-                <button 
-                  onClick={connect}
-                  className="mt-2 text-terminal border border-terminal px-2 py-1 hover:bg-terminal hover:text-black"
-                >
+                <button onClick={connect} className="mt-2 text-terminal border border-terminal px-2 py-1 hover:bg-terminal hover:text-black">
                   [RECONNECT]
                 </button>
               )}
@@ -1366,11 +158,10 @@ function App() {
           </div>
         </div>
         
-        {/* Main area */}
         <div className="flex-1 flex flex-col min-h-0">
           <ChatLog 
             messages={combinedMessages} 
-            isProcessing={isOpenCodeProcessing}
+            isProcessing={isProcessing}
             activity={activity}
             streamingContent={streamingContent}
           />
@@ -1384,24 +175,10 @@ function App() {
         </div>
       </div>
       
-      {/* Grace Period Indicator */}
-      <GracePeriodBar 
-        seconds={graceSeconds} 
-        isActive={conversationState === STATES.GRACE_PERIOD} 
-      />
-      
-      {/* Speaking Glow Border */}
-      <SpeakingGlowBorder 
-        isActive={conversationState === STATES.SPEAKING || conversationState === STATES.QUICK_LISTEN} 
-      />
-      
-      {/* Quick Listen Bar */}
-      <QuickListenBar 
-        secondsRemaining={quickListenSeconds} 
-        isActive={conversationState === STATES.QUICK_LISTEN} 
-      />
+      <GracePeriodBar seconds={graceSeconds} isActive={conversationState === STATES.GRACE_PERIOD} />
+      <SpeakingGlowBorder isActive={conversationState === STATES.SPEAKING || conversationState === STATES.QUICK_LISTEN} />
+      <QuickListenBar secondsRemaining={quickListenSeconds} isActive={conversationState === STATES.QUICK_LISTEN} />
 
-      {/* Permission Prompt */}
       {showPermissionPrompt && (
         <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50">
           <div className="border-2 border-terminal p-6 max-w-md bg-black">
@@ -1411,57 +188,39 @@ function App() {
               and record your voice commands.
             </p>
             <div className="flex gap-4">
-              <button
-                onClick={handleAllowMicrophone}
-                className="flex-1 border border-terminal text-terminal py-2 hover:bg-terminal hover:text-black"
-              >
-                ALLOW MICROPHONE
-              </button>
-              <button
-                onClick={() => setShowPermissionPrompt(false)}
-                className="flex-1 border border-gray-600 text-gray-400 py-2 hover:border-red-500 hover:text-red-500"
-              >
-                CANCEL
-              </button>
+              <button onClick={handleAllowMicrophone} className="flex-1 border border-terminal text-terminal py-2 hover:bg-terminal hover:text-black">ALLOW MICROPHONE</button>
+              <button onClick={() => setShowPermissionPrompt(false)} className="flex-1 border border-gray-600 text-gray-400 py-2 hover:border-red-500 hover:text-red-500">CANCEL</button>
             </div>
           </div>
         </div>
       )}
-      {/* Create Session Popup */}
+
       {showCreateSessionPopup && (
         <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50">
           <div className="border-2 border-terminal p-6 max-w-md bg-black">
             <h2 className="text-terminal text-lg font-bold mb-4">No Session Selected</h2>
-            <p className="text-gray-400 text-sm mb-4">
-              You need to create a session to send messages to OpenCode.
-            </p>
+            <p className="text-gray-400 text-sm mb-4">You need to create a session to send messages to OpenCode.</p>
             {pendingMessageRef.current && (
               <div className="mb-4 p-2 border border-terminal/30 bg-terminal/5">
                 <p className="text-terminal text-xs mb-1">Pending message:</p>
-                <p className="text-gray-300 text-sm italic">
-                  &quot;{pendingMessageRef.current.substring(0, 60)}{pendingMessageRef.current.length > 60 ? '...' : ''}&quot;
-                </p>
+                <p className="text-gray-300 text-sm italic">&quot;{pendingMessageRef.current.substring(0, 60)}{pendingMessageRef.current.length > 60 ? '...' : ''}&quot;</p>
               </div>
             )}
             <div className="flex gap-4">
-              <button
-                onClick={handleCreateSessionAndSend}
-                className="flex-1 border border-terminal text-terminal py-2 hover:bg-terminal hover:text-black"
-              >
-                CREATE SESSION & SEND
-              </button>
-              <button
-                onClick={handleCancelCreateSession}
-                className="flex-1 border border-gray-600 text-gray-400 py-2 hover:border-red-500 hover:text-red-500"
-              >
-                CANCEL
-              </button>
+              <button onClick={handleCreateSessionAndSend} className="flex-1 border border-terminal text-terminal py-2 hover:bg-terminal hover:text-black">CREATE SESSION & SEND</button>
+              <button onClick={handleCancelCreateSession} className="flex-1 border border-gray-600 text-gray-400 py-2 hover:border-red-500 hover:text-red-500">CANCEL</button>
             </div>
           </div>
         </div>
       )}
     </div>
-  )
+  );
 }
 
-export default App
+export default function App() {
+  return (
+    <VoiceAgentProvider heyBuddyOptions={heyBuddyOptions}>
+      <VoiceAgentApp />
+    </VoiceAgentProvider>
+  );
+}
